@@ -27,6 +27,7 @@ type config struct {
 	botPrefix       string
 	defaultTeam     string
 	defaultChannel  string
+	hideBotDM       bool
 	rateLimitPerMin int
 }
 
@@ -49,6 +50,7 @@ func main() {
 		botPrefix:       envOr("BOT_USERNAME_PREFIX", "agent-"),
 		defaultTeam:     envOr("DEFAULT_TEAM_NAME", "ai-agents"),
 		defaultChannel:  envOr("DEFAULT_CHANNEL_NAME", "agents"),
+		hideBotDM:       envBool("HIDE_BOT_DM", true),
 		rateLimitPerMin: 30,
 	}
 	if cfg.mmToken == "" || cfg.mmToken == "PENDING_REPLACE_AFTER_MM_BOOTSTRAP" {
@@ -124,6 +126,10 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("create bot", "err", err, "username", username)
 		http.Error(w, "create bot failed", http.StatusBadGateway)
 		return
+	}
+	if s.cfg.hideBotDM {
+		// Cosmetic: never fail registration if this fails.
+		s.hideBotDirectChannel(ctx, bot.UserID)
 	}
 	token, err := s.createAccessToken(ctx, bot.UserID, "agent-registrar")
 	if err != nil {
@@ -239,6 +245,38 @@ func (s *server) createBot(ctx context.Context, username, display string) (*mmBo
 		return nil, err
 	}
 	return &bot, nil
+}
+
+// hideBotDirectChannel hides the admin↔bot DM from the registrar account's sidebar.
+//
+// Mattermost CreateBot synchronously opens a DM with the creating user and posts the
+// "add me to teams/channels" welcome message before returning the bot. That path also
+// sets direct_channel_show=true for the creator. Setting the preference here (after
+// createBot returns) therefore runs after that write — no delay is required. If a
+// future Mattermost version posts the welcome async and the sidebar entry reappears,
+// re-set the preference after the DM channel exists or after a short settle delay.
+func (s *server) hideBotDirectChannel(ctx context.Context, botUserID string) {
+	me, err := s.getMe(ctx, s.cfg.mmToken)
+	if err != nil || me == nil || me.ID == "" {
+		s.log.Warn("hide bot dm: get me", "err", err, "bot_user_id", botUserID)
+		return
+	}
+	prefs := []mmPreference{{
+		UserID:   me.ID,
+		Category: "direct_channel_show",
+		Name:     botUserID,
+		Value:    "false",
+	}}
+	if err := s.mmJSON(ctx, http.MethodPut, "/api/v4/users/me/preferences", prefs, s.cfg.mmToken, nil); err != nil {
+		s.log.Warn("hide bot dm", "err", err, "bot_user_id", botUserID, "admin_user_id", me.ID)
+	}
+}
+
+type mmPreference struct {
+	UserID   string `json:"user_id"`
+	Category string `json:"category"`
+	Name     string `json:"name"`
+	Value    string `json:"value"`
 }
 
 func (s *server) createAccessToken(ctx context.Context, userID, description string) (string, error) {
@@ -391,4 +429,19 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func envBool(k string, def bool) bool {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
 }

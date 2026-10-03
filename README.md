@@ -49,6 +49,7 @@ Revokes access tokens and disables the Mattermost bot. Idempotent (`204` if alre
 | `BOT_USERNAME_PREFIX` | no | Default `agent-` |
 | `DEFAULT_TEAM_NAME` | no | Default `ai-agents` |
 | `DEFAULT_CHANNEL_NAME` | no | Default `agents` |
+| `HIDE_BOT_DM` | no | Default `true`. Hide the admin↔bot welcome DM from the registrar account's sidebar (`direct_channel_show=false`). Set `false` to keep those DMs visible. |
 | `LISTEN_ADDR` | no | Default `:8080` |
 
 ## Image
