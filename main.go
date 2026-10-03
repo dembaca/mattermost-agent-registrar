@@ -47,7 +47,7 @@ func main() {
 		mmToken:         mustEnv("MATTERMOST_TOKEN"),
 		regSecret:       mustEnv("REGISTRATION_SECRET"),
 		botPrefix:       envOr("BOT_USERNAME_PREFIX", "agent-"),
-		defaultTeam:     envOr("DEFAULT_TEAM_NAME", "bgl"),
+		defaultTeam:     envOr("DEFAULT_TEAM_NAME", "ai-agents"),
 		defaultChannel:  envOr("DEFAULT_CHANNEL_NAME", "agents"),
 		rateLimitPerMin: 30,
 	}

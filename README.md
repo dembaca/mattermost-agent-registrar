@@ -47,7 +47,7 @@ Revokes access tokens and disables the Mattermost bot. Idempotent (`204` if alre
 | `REGISTRATION_SECRET` | yes | Shared bootstrap secret |
 | `PUBLIC_CHAT_URL` | no | Default `https://chat.bgl.dembach.org` |
 | `BOT_USERNAME_PREFIX` | no | Default `agent-` |
-| `DEFAULT_TEAM_NAME` | no | Default `bgl` |
+| `DEFAULT_TEAM_NAME` | no | Default `ai-agents` |
 | `DEFAULT_CHANNEL_NAME` | no | Default `agents` |
 | `LISTEN_ADDR` | no | Default `:8080` |
 
