@@ -131,3 +131,67 @@ func TestRegisterSucceedsWhenHideDMFails(t *testing.T) {
 		t.Fatalf("unexpected resp: %+v", resp)
 	}
 }
+
+func TestRegisterWritesWhomTheAgentAnswersTo(t *testing.T) {
+	var description atomic.Value
+	users := map[string]mmUser{
+		"dembaca":  {ID: "u1", Username: "dembaca"},
+		"kollegin": {ID: "u2", Username: "kollegin"},
+		"agent-x":  {ID: "b1", Username: "agent-x", IsBot: true},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v4/users/username/{name}", func(w http.ResponseWriter, r *http.Request) {
+		u, ok := users[r.PathValue("name")]
+		if !ok {
+			http.NotFound(w, nil)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(u)
+	})
+	mux.HandleFunc("POST /api/v4/bots", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		description.Store(body["description"])
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(mmBot{UserID: "bot-id", Username: body["username"]})
+	})
+	mux.HandleFunc("POST /api/v4/users/bot-id/tokens", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(mmToken{Token: "bot-token", ID: "tok-id"})
+	})
+	mux.HandleFunc("GET /api/v4/teams/name/", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "skip", http.StatusNotFound)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	s := &server{
+		cfg: config{mmURL: ts.URL, mmToken: "admin-pat", regSecret: "secret", botPrefix: "agent-",
+			defaultTeam: "ai-agents", defaultChannel: "agents", rateLimitPerMin: 100},
+		client: ts.Client(),
+		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		hits:   map[string][]time.Time{},
+	}
+	register := func(body string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/register/v1/agents", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		rr := httptest.NewRecorder()
+		s.handleRegister(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status: got %d body %s", rr.Code, rr.Body.String())
+		}
+		return description.Load().(string)
+	}
+
+	got := register(`{"name":"vtpm-1","responsible":"@Dembaca","trusted":["dembaca","kollegin","agent-x","ghost","dembaca"],"kind":"session"}`)
+	if want := "for @dembaca · trusts @dembaca, @kollegin · via agent-registrar"; got != want {
+		t.Fatalf("description:\n got  %q\n want %q", got, want)
+	}
+	got = register(`{"name":"ops-1","responsible":"dembaca","kind":"autonomous"}`)
+	if want := "for @dembaca · autonomous · via agent-registrar"; got != want {
+		t.Fatalf("autonomous: got %q", got)
+	}
+	got = register(`{"name":"plain-1"}`)
+	if got != "Registered via agent-registrar" {
+		t.Fatalf("without fields: got %q", got)
+	}
+}

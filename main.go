@@ -18,6 +18,13 @@ import (
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$`)
 
+// userRE matches a Mattermost username as a caller may send it (after "@" and
+// case are stripped).
+var userRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// maxTrusted bounds the trusted list a caller may put into a bot's profile.
+const maxTrusted = 10
+
 type config struct {
 	listenAddr      string
 	mmURL           string
@@ -81,13 +88,18 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 type registerReq struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"display_name"`
+	// Optional: whom the agent answers to. Written into the bot's description,
+	// which the bot itself cannot change, so others can tell whose it is.
+	Responsible string   `json:"responsible"`
+	Trusted     []string `json:"trusted"`
+	Kind        string   `json:"kind"` // "session" (default) or "autonomous"
 }
 
 type registerResp struct {
-	URL       string `json:"url"`
-	Username  string `json:"username"`
-	BotToken  string `json:"bot_token"`
-	UserID    string `json:"user_id"`
+	URL      string `json:"url"`
+	Username string `json:"username"`
+	BotToken string `json:"bot_token"`
+	UserID   string `json:"user_id"`
 }
 
 func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -121,7 +133,7 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bot, err := s.createBot(ctx, username, display)
+	bot, err := s.createBot(ctx, username, display, s.describe(ctx, req))
 	if err != nil {
 		s.log.Error("create bot", "err", err, "username", username)
 		http.Error(w, "create bot failed", http.StatusBadGateway)
@@ -221,6 +233,7 @@ func (s *server) allowRate(ip string) bool {
 type mmUser struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
+	IsBot    bool   `json:"is_bot"`
 }
 
 type mmBot struct {
@@ -234,11 +247,60 @@ type mmToken struct {
 	ID    string `json:"id"`
 }
 
-func (s *server) createBot(ctx context.Context, username, display string) (*mmBot, error) {
+// describe builds the bot's description from the optional registration fields:
+// "for @alice · autonomous · trusts @alice, @bob · via agent-registrar". Every
+// name must be an existing human user; others are left out. The caller holds
+// the shared registration secret, so this records the caller's claim — but the
+// bot, which never sees that secret, cannot change it afterwards.
+func (s *server) describe(ctx context.Context, req registerReq) string {
+	human := func(raw string) (string, bool) {
+		n := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(raw), "@"))
+		if !userRE.MatchString(n) {
+			return "", false
+		}
+		u, err := s.getUserByUsername(ctx, n)
+		if err != nil || u == nil || u.IsBot {
+			s.log.Info("profile: not a human user, left out", "name", n, "err", err)
+			return "", false
+		}
+		return n, true
+	}
+	var parts []string
+	if n, ok := human(req.Responsible); ok {
+		parts = append(parts, "for @"+n)
+	}
+	if req.Kind == "autonomous" {
+		parts = append(parts, "autonomous")
+	}
+	var trusted []string
+	seen := map[string]bool{}
+	for _, raw := range req.Trusted {
+		if len(trusted) >= maxTrusted {
+			break
+		}
+		if n, ok := human(raw); ok && !seen[n] {
+			seen[n] = true
+			trusted = append(trusted, n)
+		}
+	}
+	if len(trusted) > 0 {
+		parts = append(parts, "trusts @"+strings.Join(trusted, ", @"))
+	}
+	if len(parts) == 0 {
+		return "Registered via agent-registrar"
+	}
+	d := strings.Join(append(parts, "via agent-registrar"), " · ")
+	if len(d) > 1024 {
+		d = d[:1024]
+	}
+	return d
+}
+
+func (s *server) createBot(ctx context.Context, username, display, description string) (*mmBot, error) {
 	body := map[string]any{
 		"username":     username,
 		"display_name": display,
-		"description":  "Registered via agent-registrar",
+		"description":  description,
 	}
 	var bot mmBot
 	if err := s.mmJSON(ctx, http.MethodPost, "/api/v4/bots", body, s.cfg.mmToken, &bot); err != nil {
