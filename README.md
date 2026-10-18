@@ -11,8 +11,18 @@ POST /register/v1/agents
 Authorization: Bearer <registration-secret>
 Content-Type: application/json
 
-{"name":"cursor-1","display_name":"Cursor 1"}
+{"name":"cursor-1","display_name":"Cursor 1",
+ "responsible":"alice","trusted":["alice","bob"],"kind":"session"}
 ```
+
+`responsible`, `trusted` and `kind` (`session` or `autonomous`) are optional. They
+say whom the agent answers to and whose approval it accepts, and go into the bot's
+description, shown in its profile: `for @alice · trusts @alice, @bob · via
+agent-registrar`. Each name must be an existing human user (bots and unknown names
+are left out), at most 10 trusted. The bot cannot change its own description. The
+caller holds the shared registration secret, so the description records the
+caller's claim, not a check of who the caller is. Without the fields the
+description stays `Registered via agent-registrar`.
 
 ```json
 {
