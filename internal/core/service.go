@@ -43,6 +43,9 @@ type Policy struct {
 	DefaultMaxBots   int
 	MaxBotsLimit     int
 	MaxTokensPerUser int
+	// TokenRetention is how long a revoked or expired token stays in the
+	// store before it is pruned; 0 prunes it at the next pass.
+	TokenRetention time.Duration
 }
 
 // Service runs the protocol: registration (shared secret or enrollment
@@ -312,13 +315,56 @@ func (s *Service) Unregister(ctx context.Context, cred, name string) error {
 	if !ok {
 		return ErrUnauthorized
 	}
-	if err := s.Provider.RevokeAgent(ctx, *agent); err != nil {
+	return s.disable(ctx, *agent)
+}
+
+// disable revokes the agent through the provider and forgets its record:
+// the one way the registrar removes a bot.
+func (s *Service) disable(ctx context.Context, agent Agent) error {
+	if err := s.Provider.RevokeAgent(ctx, agent); err != nil {
 		return fmt.Errorf("%w: disable: %v", ErrUpstream, err)
 	}
 	if s.Store != nil {
-		if err := s.Store.RemoveAgent(username); err != nil {
-			s.Log.Warn("forget agent", "err", err, "username", username)
+		if err := s.Store.RemoveAgent(agent.Username); err != nil {
+			s.Log.Warn("forget agent", "err", err, "username", agent.Username)
 		}
 	}
 	return nil
+}
+
+// unregisterEnrolled removes a bot recorded for a token, as Unregister does.
+// A bot that is gone, or whose username now belongs to another account, is
+// only forgotten; removed says whether a bot was disabled.
+func (s *Service) unregisterEnrolled(ctx context.Context, rec AgentRecord) (removed bool, err error) {
+	agent, err := s.Provider.FindAgent(ctx, rec.Username)
+	if err != nil {
+		return false, fmt.Errorf("%w: lookup: %v", ErrUpstream, err)
+	}
+	if agent == nil || agent.ID != rec.UserID {
+		if agent != nil {
+			s.Log.Warn("enrolled username now belongs to another account; forgetting the record only",
+				"username", rec.Username, "recorded_id", rec.UserID, "found_id", agent.ID)
+		}
+		return false, s.Store.RemoveAgent(rec.Username)
+	}
+	if err := s.disable(ctx, *agent); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// PruneTokens drops tokens revoked or expired longer than the retention ago
+// that have no live bots (see Store.Prune).
+func (s *Service) PruneTokens() {
+	if s.Store == nil {
+		return
+	}
+	n, err := s.Store.Prune(s.now(), s.Policy.TokenRetention)
+	if err != nil {
+		s.Log.Error("prune enrollment tokens", "err", err)
+		return
+	}
+	if n > 0 {
+		s.Log.Info("pruned enrollment tokens", "count", n)
+	}
 }

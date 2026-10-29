@@ -40,5 +40,5 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/dembaca/mattermost-agent-registrar:0.2.0
+            ghcr.io/dembaca/mattermost-agent-registrar:0.3.0
             ghcr.io/dembaca/mattermost-agent-registrar:latest

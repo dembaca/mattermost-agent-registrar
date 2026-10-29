@@ -35,25 +35,61 @@ func (s *Service) Command(ctx context.Context, inv Invocation) string {
 		if len(args) != 2 {
 			return "Usage: `" + trigger + " revoke <id|all>`"
 		}
-		n, err := s.Store.Revoke(inv.Human.ID, strings.ToLower(args[1]), s.now())
-		if err != nil {
-			s.Log.Error("revoke", "err", err)
-			return "Revoking failed; try again."
-		}
-		if n == 0 {
-			return "No active token of yours matches `" + args[1] + "`."
-		}
-		s.Log.Info("revoked enrollment tokens", "owner", inv.Human.Handle, "which", args[1], "count", n)
-		return fmt.Sprintf("Revoked %d token(s). Bots already registered with them keep running; unregister them to remove them.", n)
+		return s.revoke(ctx, inv, trigger, strings.ToLower(args[1]))
 	}
 	return usage(trigger)
+}
+
+// revoke revokes the caller's token id (or all of them) and unregisters the
+// bots registered with the matching revoked tokens, through the same path as
+// Unregister. A bot that cannot be removed is reported and stays recorded, so
+// running the revoke again retries it.
+func (s *Service) revoke(ctx context.Context, inv Invocation, trigger, which string) string {
+	// Serialised with enrollments: no bot is enrolled with a token after its
+	// bots were collected here.
+	s.enrollMu.Lock()
+	defer s.enrollMu.Unlock()
+	n, err := s.Store.Revoke(inv.Human.ID, which, s.now())
+	if err != nil {
+		s.Log.Error("revoke", "err", err)
+		return "Revoking failed; try again."
+	}
+	removed := 0
+	var failed []string
+	for _, t := range s.Store.Owned(inv.Human.ID) {
+		if t.RevokedAt == nil || (which != "all" && t.ID != which) {
+			continue
+		}
+		for _, a := range s.Store.AgentsOf(t.ID) {
+			ok, err := s.unregisterEnrolled(ctx, a)
+			if err != nil {
+				s.Log.Warn("unregister bot of revoked token", "err", err, "username", a.Username, "token_id", t.ID)
+				failed = append(failed, "@"+a.Username)
+				continue
+			}
+			if ok {
+				removed++
+			}
+		}
+	}
+	if n == 0 && removed == 0 && len(failed) == 0 {
+		return "No active token of yours matches `" + which + "`."
+	}
+	s.Log.Info("revoked enrollment tokens", "owner", inv.Human.Handle, "which", which, "count", n,
+		"bots_removed", removed, "bots_failed", len(failed))
+	out := fmt.Sprintf("Revoked %d token(s); unregistered %d bot(s) registered with them.", n, removed)
+	if len(failed) > 0 {
+		out += fmt.Sprintf(" Unregistering %d bot(s) failed (%s); run `%s revoke %s` again to retry.",
+			len(failed), strings.Join(failed, ", "), trigger, which)
+	}
+	return out
 }
 
 func usage(trigger string) string {
 	return "Enrollment tokens let an agent register a bot that is bound to you.\n\n" +
 		"- `" + trigger + " create [--expires 30d] [--max-bots N] [--channels a,b] [--kind session|autonomous] [--label text]`\n" +
 		"- `" + trigger + " list`\n" +
-		"- `" + trigger + " revoke <id|all>`"
+		"- `" + trigger + " revoke <id|all>` (also unregisters the bots registered with it)"
 }
 
 func (s *Service) create(ctx context.Context, inv Invocation, trigger string, args []string) string {
