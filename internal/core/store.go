@@ -42,6 +42,15 @@ func (t Token) Active(now time.Time) bool {
 	return t.RevokedAt == nil && now.Before(t.ExpiresAt)
 }
 
+// inactiveSince is when the token stopped being usable: revoked or expired,
+// whichever came first.
+func (t Token) inactiveSince() time.Time {
+	if t.RevokedAt != nil && t.RevokedAt.Before(t.ExpiresAt) {
+		return *t.RevokedAt
+	}
+	return t.ExpiresAt
+}
+
 // AgentRecord is a bot registered with an enrollment token, kept until it is
 // unregistered; it counts against the token's MaxBots.
 type AgentRecord struct {
@@ -240,6 +249,52 @@ func (s *Store) Touch(id string, now time.Time) error {
 		return s.saveLocked()
 	}
 	return nil
+}
+
+// AgentsOf lists the agents a token has registered and not unregistered.
+// These records are the token's bots: each names the bot's provider user id
+// and the token it was enrolled with.
+func (s *Store) AgentsOf(tokenID string) []AgentRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []AgentRecord
+	for _, a := range s.st.Agents {
+		if a.TokenID == tokenID {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// Prune forgets tokens that have been revoked or expired for at least
+// retention and have no live bots left. A token whose bots are still
+// recorded stays, so they keep their owner binding and can still be removed
+// through it. It returns how many tokens it dropped.
+func (s *Store) Prune(now time.Time, retention time.Duration) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	live := map[string]bool{}
+	for _, a := range s.st.Agents {
+		live[a.TokenID] = true
+	}
+	kept := make([]Token, 0, len(s.st.Tokens))
+	for _, t := range s.st.Tokens {
+		if !t.Active(now) && !live[t.ID] && !now.Before(t.inactiveSince().Add(retention)) {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	n := len(s.st.Tokens) - len(kept)
+	if n == 0 {
+		return 0, nil
+	}
+	old := s.st.Tokens
+	s.st.Tokens = kept
+	if err := s.saveLocked(); err != nil {
+		s.st.Tokens = old
+		return 0, err
+	}
+	return n, nil
 }
 
 // LiveAgents counts the agents a token has registered and not unregistered.

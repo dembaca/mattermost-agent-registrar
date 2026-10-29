@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dembaca/mattermost-agent-registrar/internal/mattermost"
 )
@@ -73,6 +74,18 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if _, err := load(map[string]string{"SLASH_COMMAND_TOKEN": "x", "ENROLLMENT_PEPPER": strings.Repeat("p", 32), "ENROLLMENT_MAX_TTL": "7d"}); err == nil {
 		t.Fatal("default TTL above max accepted")
+	}
+	if cfg, err := load(nil); err != nil || cfg.policy.TokenRetention != 30*24*time.Hour {
+		t.Fatalf("default retention: %v %v", cfg.policy.TokenRetention, err)
+	}
+	if cfg, err := load(map[string]string{"ENROLLMENT_RETENTION": "0"}); err != nil || cfg.policy.TokenRetention != 0 {
+		t.Fatalf("retention 0: %v %v", cfg.policy.TokenRetention, err)
+	}
+	if cfg, err := load(map[string]string{"ENROLLMENT_RETENTION": "2w"}); err != nil || cfg.policy.TokenRetention != 14*24*time.Hour {
+		t.Fatalf("retention 2w: %v %v", cfg.policy.TokenRetention, err)
+	}
+	if _, err := load(map[string]string{"ENROLLMENT_RETENTION": "soon"}); err == nil || !strings.Contains(err.Error(), "ENROLLMENT_RETENTION") {
+		t.Fatalf("bad retention: %v", err)
 	}
 }
 

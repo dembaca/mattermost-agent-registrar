@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0
+
+- **Revoking a token unregisters its bots.** `/agent-token revoke <id|all>` now
+  also removes every bot still registered with the revoked tokens, through the
+  same provider path as `DELETE /register/v1/agents/{name}`, and says how many it
+  removed. Failures are named in the reply, not fatal; the bot stays recorded and
+  the same revoke retries it. A username that now belongs to another account is
+  only forgotten. The bots come from the store's existing `agents` records
+  (`user_id`, `token_id`), so 0.2.0 stores need no migration.
+- **Pruning.** Revoked and expired tokens are dropped from the store after
+  `ENROLLMENT_RETENTION` (default `30d`; `0` = at the next pass), at start and
+  hourly, but never while a bot registered with them is still live.
+
 ## 0.2.0
 
 - **Enrollment tokens.** A new slash command endpoint, `POST /register/v1/command`

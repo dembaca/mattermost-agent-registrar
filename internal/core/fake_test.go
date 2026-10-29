@@ -14,19 +14,20 @@ import (
 // fakeProvider is an in-memory ProviderPort: humans, channels with members,
 // and a log of what the protocol asked it to do.
 type fakeProvider struct {
-	mu       sync.Mutex
-	humans   map[string]Human           // by handle
-	public   map[string]bool            // channel name -> public
-	members  map[string]map[string]bool // channel -> human ids
-	team     map[string]bool            // human ids in the team
-	agents   map[string]Agent           // by username
-	creds    map[string]string          // credential -> agent id
-	profiles map[string]string          // username -> description
-	bound    map[string]string          // agent id -> owner id
-	joined   map[string][]string        // agent id -> channels
-	revoked  map[string]bool            // agent id
-	failBind bool
-	next     int
+	mu         sync.Mutex
+	humans     map[string]Human           // by handle
+	public     map[string]bool            // channel name -> public
+	members    map[string]map[string]bool // channel -> human ids
+	team       map[string]bool            // human ids in the team
+	agents     map[string]Agent           // by username
+	creds      map[string]string          // credential -> agent id
+	profiles   map[string]string          // username -> description
+	bound      map[string]string          // agent id -> owner id
+	joined     map[string][]string        // agent id -> channels
+	revoked    map[string]bool            // agent id
+	failBind   bool
+	failRevoke map[string]bool // usernames whose RevokeAgent fails
+	next       int
 }
 
 func newFake() *fakeProvider {
@@ -151,6 +152,9 @@ func (f *fakeProvider) JoinChannels(_ context.Context, a Agent, chans []string) 
 func (f *fakeProvider) RevokeAgent(_ context.Context, a Agent) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failRevoke[a.Username] {
+		return errors.New("502 revoke")
+	}
 	f.revoked[a.ID] = true
 	delete(f.agents, a.Username)
 	return nil

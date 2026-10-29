@@ -18,7 +18,10 @@ import (
 )
 
 // version is the release; CHANGELOG.md and the image tag in CI follow it.
-const version = "0.2.0"
+const version = "0.3.0"
+
+// pruneEvery is how often the token store is pruned while running.
+const pruneEvery = time.Hour
 
 type config struct {
 	listenAddr      string
@@ -56,6 +59,14 @@ func main() {
 	}
 	log.Info("listening", "version", version, "addr", cfg.listenAddr, "mattermost", cfg.mm.URL,
 		"shared_secret", cfg.policy.SharedSecret != "", "enrollment", s.svc.Store != nil)
+	if s.svc.Store != nil {
+		s.svc.PruneTokens()
+		go func() {
+			for range time.Tick(pruneEvery) {
+				s.svc.PruneTokens()
+			}
+		}()
+	}
 	if err := http.ListenAndServe(cfg.listenAddr, s.routes()); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
@@ -122,6 +133,12 @@ func loadConfig(getenv func(string) string) (config, error) {
 			MaxBotsLimit:     num("ENROLLMENT_MAX_BOTS_LIMIT", 20),
 			MaxTokensPerUser: num("ENROLLMENT_MAX_TOKENS_PER_USER", 20),
 		},
+	}
+	// 0 is allowed here: prune revoked and expired tokens at the next pass.
+	if d, err := core.ParseTTL(env("ENROLLMENT_RETENTION", "30d")); err != nil || d < 0 {
+		errs = append(errs, errors.New("ENROLLMENT_RETENTION: not a duration like 30d or 12h (0 to prune at once)"))
+	} else {
+		cfg.policy.TokenRetention = d
 	}
 	if envBool(getenv, "ALLOW_SHARED_SECRET", true) {
 		cfg.policy.SharedSecret = env("REGISTRATION_SECRET", "")

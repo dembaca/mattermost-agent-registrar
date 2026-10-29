@@ -138,8 +138,13 @@ accounts are refused. Every answer is ephemeral: only the caller sees it.
   more than `ENROLLMENT_MAX_TOKENS_PER_USER` active tokens.
 - `list` shows the caller's active tokens: id, label, kind, live/max bots,
   channels, expiry, last use. Never the token itself.
-- `revoke <id>` or `revoke all` revokes the caller's own tokens. Bots already
-  registered keep running; unregister them to remove them. Deactivating the
+- `revoke <id>` or `revoke all` revokes the caller's own tokens and unregisters
+  every bot still registered with them, the same way `DELETE` does (token
+  revoked, bot disabled). The reply says how many bots were removed; a bot that
+  could not be removed is named and stays recorded, and running the same revoke
+  again retries it. A bot whose username now belongs to another account (deleted
+  and recreated outside the registrar) is only forgotten, never touched. An
+  *expired* token's bots keep running until unregistered. Deactivating the
   owner in Mattermost disables their bots (`DisableBotsWhenOwnerIsDeactivated`,
   on by default) and stops their tokens.
 
@@ -151,6 +156,12 @@ expiry, last used, revoked, plus the bots each token registered. The token itsel
 is never stored, only `HMAC-SHA256(ENROLLMENT_PEPPER, token)`. Without the
 pepper the file cannot be used to check or forge a token; changing the pepper
 invalidates every token. One registrar process owns the file: run one replica.
+
+**Pruning.** A revoked or expired token is removed from the store once it has
+been unusable for `ENROLLMENT_RETENTION` (default `30d`) and no bot registered
+with it is still live; until then `list` counts it as expired or revoked. The
+registrar prunes at start and then hourly. A token with live bots stays, so
+those bots stay bound and can still be removed with `revoke`.
 
 ### Health
 
@@ -173,6 +184,7 @@ invalidates every token. One registrar process owns the file: run one replica.
 | `ENROLLMENT_DEFAULT_MAX_BOTS` | no | Default `3`. Live bots per token without `--max-bots` |
 | `ENROLLMENT_MAX_BOTS_LIMIT` | no | Default `20`. Largest `--max-bots` allowed |
 | `ENROLLMENT_MAX_TOKENS_PER_USER` | no | Default `20`. Active tokens one human may hold |
+| `ENROLLMENT_RETENTION` | no | Default `30d`. How long a revoked or expired token without live bots stays in the store before it is pruned; `0` prunes at the next pass (start, then hourly) |
 | `MAX_TRUSTED` | no | Default `10`. Trusted names written into a description; more are cut and marked `+N` |
 | `BOT_USERNAME_PREFIX` | no | Default `agent-` |
 | `DEFAULT_TEAM_NAME` | no | Default `ai-agents`. Team new bots join, and the team `--channels` names are looked up in; it must exist |
@@ -250,8 +262,8 @@ revokes it:
 The bots it registers are bound to the victim: other agents treat them as the
 victim's and the profile says `for @<victim>`. That is the main harm. Limits:
 short `--expires`, a small `--max-bots`, `/agent-token list` shows `last used`
-and live bot counts, and `revoke` stops new registrations at once. Unregister
-the bots it made (`DELETE` with the owner's own token, or an admin).
+and live bot counts, and `revoke` stops new registrations at once and
+unregisters the bots the token made.
 
 **A bot's token** is unscoped in Mattermost: a bot can join any public channel
 of its teams itself. The channel scope therefore governs where the registrar puts
@@ -288,8 +300,9 @@ docker run --rm -p 8080:8080 \
   -e PUBLIC_CHAT_URL=https://chat.example.com \
   -e SLASH_COMMAND_TOKEN=... \
   -e ENROLLMENT_PEPPER=... \
+  -e ENROLLMENT_RETENTION=30d \
   -e REGISTRATION_SECRET=... \
-  ghcr.io/dembaca/mattermost-agent-registrar:0.2.0
+  ghcr.io/dembaca/mattermost-agent-registrar:0.3.0
 ```
 
 Serve `/register/v1/` on the same host as Mattermost (for example
@@ -312,8 +325,8 @@ the token store is a local file.
 ## Image
 
 ```bash
-docker build -t ghcr.io/dembaca/mattermost-agent-registrar:0.2.0 .
-docker push ghcr.io/dembaca/mattermost-agent-registrar:0.2.0
+docker build -t ghcr.io/dembaca/mattermost-agent-registrar:0.3.0 .
+docker push ghcr.io/dembaca/mattermost-agent-registrar:0.3.0
 ```
 
 CI (`.github/workflows/build.yml`) runs gofmt, `go vet` and `go test -race`, and
