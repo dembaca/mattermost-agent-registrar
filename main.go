@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,74 +8,166 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dembaca/mattermost-agent-registrar/internal/core"
+	"github.com/dembaca/mattermost-agent-registrar/internal/mattermost"
 )
 
-var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$`)
-
-// userRE matches a Mattermost username as a caller may send it (after "@" and
-// case are stripped).
-var userRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-
-// maxTrusted bounds the trusted list a caller may put into a bot's profile.
-const maxTrusted = 10
+// version is the release; CHANGELOG.md and the image tag in CI follow it.
+const version = "0.2.0"
 
 type config struct {
 	listenAddr      string
-	mmURL           string
 	publicChatURL   string
-	mmToken         string
-	regSecret       string
-	botPrefix       string
-	defaultTeam     string
-	defaultChannel  string
-	hideBotDM       bool
 	rateLimitPerMin int
+	enrollStore     string
+	pepper          string
+	mm              mattermost.Config
+	policy          core.Policy
 }
 
 type server struct {
-	cfg    config
-	client *http.Client
-	log    *slog.Logger
-	mu     sync.Mutex
-	hits   map[string][]time.Time
+	cfg  config
+	svc  *core.Service
+	port core.ProviderPort
+	log  *slog.Logger
+	mu   sync.Mutex
+	hits map[string][]time.Time
 }
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	cfg := config{
-		listenAddr:      envOr("LISTEN_ADDR", ":8080"),
-		mmURL:           strings.TrimRight(mustEnv("MATTERMOST_URL"), "/"),
-		publicChatURL:   strings.TrimRight(envOr("PUBLIC_CHAT_URL", "https://chat.bgl.dembach.org"), "/"),
-		mmToken:         mustEnv("MATTERMOST_TOKEN"),
-		regSecret:       mustEnv("REGISTRATION_SECRET"),
-		botPrefix:       envOr("BOT_USERNAME_PREFIX", "agent-"),
-		defaultTeam:     envOr("DEFAULT_TEAM_NAME", "ai-agents"),
-		defaultChannel:  envOr("DEFAULT_CHANNEL_NAME", "agents"),
-		hideBotDM:       envBool("HIDE_BOT_DM", true),
-		rateLimitPerMin: 30,
+	cfg, err := loadConfig(os.Getenv)
+	if err != nil {
+		log.Error("config", "err", err)
+		os.Exit(1)
 	}
-	if cfg.mmToken == "" || cfg.mmToken == "PENDING_REPLACE_AFTER_MM_BOOTSTRAP" {
+	if cfg.mm.Token == "PENDING_REPLACE_AFTER_MM_BOOTSTRAP" {
 		log.Warn("MATTERMOST_TOKEN is placeholder; register/unregister will fail until a real admin PAT is set")
 	}
-	s := &server{
-		cfg:    cfg,
-		client: &http.Client{Timeout: 30 * time.Second},
-		log:    log,
-		hits:   map[string][]time.Time{},
+	s, err := newServer(cfg, &http.Client{Timeout: 30 * time.Second}, log)
+	if err != nil {
+		log.Error("startup", "err", err)
+		os.Exit(1)
 	}
+	log.Info("listening", "version", version, "addr", cfg.listenAddr, "mattermost", cfg.mm.URL,
+		"shared_secret", cfg.policy.SharedSecret != "", "enrollment", s.svc.Store != nil)
+	if err := http.ListenAndServe(cfg.listenAddr, s.routes()); err != nil {
+		log.Error("server stopped", "err", err)
+		os.Exit(1)
+	}
+}
+
+// loadConfig reads the environment. Every name and limit is a setting; the
+// defaults only fill in what the operator left out.
+func loadConfig(getenv func(string) string) (config, error) {
+	env := func(k, def string) string {
+		if v := strings.TrimSpace(getenv(k)); v != "" {
+			return v
+		}
+		return def
+	}
+	var errs []error
+	need := func(k string) string {
+		v := env(k, "")
+		if v == "" {
+			errs = append(errs, fmt.Errorf("missing env %s", k))
+		}
+		return v
+	}
+	num := func(k string, def int) int {
+		v := env(k, "")
+		if v == "" {
+			return def
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			errs = append(errs, fmt.Errorf("%s: not a number: %q", k, v))
+			return def
+		}
+		return n
+	}
+	ttl := func(k, def string) time.Duration {
+		d, err := core.ParseTTL(env(k, def))
+		if err != nil || d <= 0 {
+			errs = append(errs, fmt.Errorf("%s: not a duration like 30d or 12h", k))
+		}
+		return d
+	}
+	cfg := config{
+		listenAddr:      env("LISTEN_ADDR", ":8080"),
+		publicChatURL:   strings.TrimRight(env("PUBLIC_CHAT_URL", "https://chat.bgl.dembach.org"), "/"),
+		rateLimitPerMin: 30,
+		enrollStore:     env("ENROLLMENT_STORE", "/data/enrollments.json"),
+		pepper:          env("ENROLLMENT_PEPPER", ""),
+		mm: mattermost.Config{
+			URL:              strings.TrimRight(need("MATTERMOST_URL"), "/"),
+			Token:            need("MATTERMOST_TOKEN"),
+			Team:             env("DEFAULT_TEAM_NAME", "ai-agents"),
+			HideBotDM:        envBool(getenv, "HIDE_BOT_DM", true),
+			CommandTokens:    splitList(env("SLASH_COMMAND_TOKEN", "")),
+			TokenDescription: "agent-registrar",
+		},
+		policy: core.Policy{
+			BotPrefix:        env("BOT_USERNAME_PREFIX", "agent-"),
+			DefaultChannel:   env("DEFAULT_CHANNEL_NAME", "agents"),
+			MaxTrusted:       num("MAX_TRUSTED", 10),
+			DefaultTTL:       ttl("ENROLLMENT_DEFAULT_TTL", "30d"),
+			MaxTTL:           ttl("ENROLLMENT_MAX_TTL", "90d"),
+			DefaultMaxBots:   num("ENROLLMENT_DEFAULT_MAX_BOTS", 3),
+			MaxBotsLimit:     num("ENROLLMENT_MAX_BOTS_LIMIT", 20),
+			MaxTokensPerUser: num("ENROLLMENT_MAX_TOKENS_PER_USER", 20),
+		},
+	}
+	if envBool(getenv, "ALLOW_SHARED_SECRET", true) {
+		cfg.policy.SharedSecret = env("REGISTRATION_SECRET", "")
+	}
+	p := cfg.policy
+	if p.DefaultTTL > p.MaxTTL {
+		errs = append(errs, errors.New("ENROLLMENT_DEFAULT_TTL exceeds ENROLLMENT_MAX_TTL"))
+	}
+	if p.DefaultMaxBots < 1 || p.DefaultMaxBots > p.MaxBotsLimit {
+		errs = append(errs, errors.New("ENROLLMENT_DEFAULT_MAX_BOTS must be 1..ENROLLMENT_MAX_BOTS_LIMIT"))
+	}
+	enroll := len(cfg.mm.CommandTokens) > 0
+	switch {
+	case enroll && len(cfg.pepper) < 32:
+		errs = append(errs, errors.New("SLASH_COMMAND_TOKEN needs ENROLLMENT_PEPPER (at least 32 characters)"))
+	case !enroll && cfg.pepper != "":
+		errs = append(errs, errors.New("ENROLLMENT_PEPPER is set but SLASH_COMMAND_TOKEN is not"))
+	}
+	if !enroll && p.SharedSecret == "" {
+		errs = append(errs, errors.New("no way to register: set REGISTRATION_SECRET (with ALLOW_SHARED_SECRET not false) or SLASH_COMMAND_TOKEN and ENROLLMENT_PEPPER"))
+	}
+	return cfg, errors.Join(errs...)
+}
+
+func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, error) {
+	port := &mattermost.Adapter{Cfg: cfg.mm, Client: client, Log: log}
+	svc := &core.Service{Provider: port, Policy: cfg.policy, Log: log}
+	if len(cfg.mm.CommandTokens) > 0 {
+		st, err := core.OpenStore(cfg.enrollStore, []byte(cfg.pepper))
+		if err != nil {
+			return nil, err
+		}
+		svc.Store = st
+	}
+	return &server{cfg: cfg, svc: svc, port: port, log: log, hits: map[string][]time.Time{}}, nil
+}
+
+func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("POST /register/v1/agents", s.handleRegister)
 	mux.HandleFunc("DELETE /register/v1/agents/{name}", s.handleUnregister)
-	log.Info("listening", "addr", cfg.listenAddr, "mattermost", cfg.mmURL)
-	if err := http.ListenAndServe(cfg.listenAddr, mux); err != nil {
-		log.Error("server stopped", "err", err)
-		os.Exit(1)
+	if s.svc.Store != nil {
+		mux.HandleFunc("POST /register/v1/command", s.handleCommand)
 	}
+	return mux
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -85,25 +175,41 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-type registerReq struct {
-	Name        string `json:"name"`
-	DisplayName string `json:"display_name"`
-	// Optional: whom the agent answers to. Written into the bot's description,
-	// which the bot itself cannot change, so others can tell whose it is.
-	Responsible string   `json:"responsible"`
-	Trusted     []string `json:"trusted"`
-	Kind        string   `json:"kind"` // "session" (default) or "autonomous"
-}
-
 type registerResp struct {
 	URL      string `json:"url"`
 	Username string `json:"username"`
 	BotToken string `json:"bot_token"`
 	UserID   string `json:"user_id"`
+	Owner    string `json:"owner,omitempty"` // bound owner; absent for unbound bots
+}
+
+// fail maps a core error kind to a status; the message after the kind is
+// meant for the caller.
+func (s *server) fail(w http.ResponseWriter, err error) {
+	status, msg := http.StatusInternalServerError, "internal error"
+	switch {
+	case errors.Is(err, core.ErrBadRequest):
+		status, msg = http.StatusBadRequest, err.Error()
+	case errors.Is(err, core.ErrUnauthorized):
+		status, msg = http.StatusUnauthorized, err.Error()
+	case errors.Is(err, core.ErrForbidden):
+		status, msg = http.StatusForbidden, err.Error()
+	case errors.Is(err, core.ErrConflict):
+		status, msg = http.StatusConflict, err.Error()
+	case errors.Is(err, core.ErrUpstream):
+		// "provider error: create bot: <detail>" -> "create bot failed"; the detail goes to the log only.
+		status = http.StatusBadGateway
+		msg = strings.SplitN(strings.TrimPrefix(err.Error(), core.ErrUpstream.Error()+": "), ":", 2)[0] + " failed"
+	}
+	if status >= 500 {
+		s.log.Error("request failed", "err", err)
+	}
+	http.Error(w, msg, status)
 }
 
 func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizeRegistration(r) {
+	cred := bearer(r)
+	if cred == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -111,104 +217,56 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
-	var req registerReq
+	var req core.RegisterRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	name := strings.ToLower(strings.TrimSpace(req.Name))
-	if !nameRE.MatchString(name) {
-		http.Error(w, "invalid name (use 3-32 lowercase alnum/hyphen)", http.StatusBadRequest)
-		return
-	}
-	username := s.cfg.botPrefix + name
-	display := strings.TrimSpace(req.DisplayName)
-	if display == "" {
-		display = username
-	}
-
-	ctx := r.Context()
-	if existing, err := s.getUserByUsername(ctx, username); err == nil && existing != nil {
-		http.Error(w, "agent already registered", http.StatusConflict)
-		return
-	}
-
-	bot, err := s.createBot(ctx, username, display, s.describe(ctx, req))
+	reg, err := s.svc.Register(r.Context(), cred, req)
 	if err != nil {
-		s.log.Error("create bot", "err", err, "username", username)
-		http.Error(w, "create bot failed", http.StatusBadGateway)
+		s.fail(w, err)
 		return
 	}
-	if s.cfg.hideBotDM {
-		// Cosmetic: never fail registration if this fails.
-		s.hideBotDirectChannel(ctx, bot.UserID)
-	}
-	token, err := s.createAccessToken(ctx, bot.UserID, "agent-registrar")
-	if err != nil {
-		s.log.Error("create token", "err", err, "user_id", bot.UserID)
-		_ = s.disableBot(ctx, bot.UserID)
-		http.Error(w, "create token failed", http.StatusBadGateway)
-		return
-	}
-	if err := s.ensureTeamChannel(ctx, bot.UserID); err != nil {
-		s.log.Warn("team/channel invite", "err", err, "user_id", bot.UserID)
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(registerResp{
 		URL:      s.cfg.publicChatURL,
-		Username: username,
-		BotToken: token,
-		UserID:   bot.UserID,
+		Username: reg.Agent.Username,
+		BotToken: reg.Credential,
+		UserID:   reg.Agent.ID,
+		Owner:    reg.Owner,
 	})
 }
 
 func (s *server) handleUnregister(w http.ResponseWriter, r *http.Request) {
-	name := strings.ToLower(strings.TrimSpace(r.PathValue("name")))
-	if !nameRE.MatchString(name) {
-		http.Error(w, "invalid name", http.StatusBadRequest)
-		return
-	}
-	username := s.cfg.botPrefix + name
-	auth := bearer(r)
-	if auth == "" {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	ctx := r.Context()
-	user, err := s.getUserByUsername(ctx, username)
-	if err != nil || user == nil {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	ok := false
-	if auth == s.cfg.regSecret {
-		ok = true
-	} else if me, err := s.getMe(ctx, auth); err == nil && me != nil && me.ID == user.ID {
-		ok = true
-	}
-	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
 	if !s.allowRate(clientIP(r)) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
-
-	_ = s.revokeAllTokens(ctx, user.ID)
-	if err := s.disableBot(ctx, user.ID); err != nil {
-		s.log.Error("disable bot", "err", err, "user_id", user.ID)
-		http.Error(w, "disable failed", http.StatusBadGateway)
+	if err := s.svc.Unregister(r.Context(), bearer(r), r.PathValue("name")); err != nil {
+		s.fail(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *server) authorizeRegistration(r *http.Request) bool {
-	return bearer(r) != "" && bearer(r) == s.cfg.regSecret
+// handleCommand serves the slash command (/agent-token or whatever trigger
+// the operator chose). Every answer is private to the caller.
+func (s *server) handleCommand(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if !s.allowRate(clientIP(r)) {
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
+	inv, err := s.port.VerifyInvocation(r)
+	if err != nil {
+		if errors.Is(err, core.ErrForbidden) {
+			s.port.ReplyPrivate(w, inv, strings.TrimPrefix(err.Error(), core.ErrForbidden.Error()+": "))
+			return
+		}
+		s.fail(w, err)
+		return
+	}
+	s.port.ReplyPrivate(w, inv, s.svc.Command(r.Context(), inv))
 }
 
 func (s *server) allowRate(ip string) bool {
@@ -230,234 +288,6 @@ func (s *server) allowRate(ip string) bool {
 	return true
 }
 
-type mmUser struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
-	IsBot    bool   `json:"is_bot"`
-}
-
-type mmBot struct {
-	UserID      string `json:"user_id"`
-	Username    string `json:"username"`
-	DisplayName string `json:"display_name"`
-}
-
-type mmToken struct {
-	Token string `json:"token"`
-	ID    string `json:"id"`
-}
-
-// describe builds the bot's description from the optional registration fields:
-// "for @alice · autonomous · trusts @alice, @bob · via agent-registrar". Every
-// name must be an existing human user; others are left out. The caller holds
-// the shared registration secret, so this records the caller's claim — but the
-// bot, which never sees that secret, cannot change it afterwards.
-func (s *server) describe(ctx context.Context, req registerReq) string {
-	human := func(raw string) (string, bool) {
-		n := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(raw), "@"))
-		if !userRE.MatchString(n) {
-			return "", false
-		}
-		u, err := s.getUserByUsername(ctx, n)
-		if err != nil || u == nil || u.IsBot {
-			s.log.Info("profile: not a human user, left out", "name", n, "err", err)
-			return "", false
-		}
-		return n, true
-	}
-	var parts []string
-	if n, ok := human(req.Responsible); ok {
-		parts = append(parts, "for @"+n)
-	}
-	if req.Kind == "autonomous" {
-		parts = append(parts, "autonomous")
-	}
-	var trusted []string
-	seen := map[string]bool{}
-	for _, raw := range req.Trusted {
-		if len(trusted) >= maxTrusted {
-			break
-		}
-		if n, ok := human(raw); ok && !seen[n] {
-			seen[n] = true
-			trusted = append(trusted, n)
-		}
-	}
-	if len(trusted) > 0 {
-		parts = append(parts, "trusts @"+strings.Join(trusted, ", @"))
-	}
-	if len(parts) == 0 {
-		return "Registered via agent-registrar"
-	}
-	d := strings.Join(append(parts, "via agent-registrar"), " · ")
-	if len(d) > 1024 {
-		d = d[:1024]
-	}
-	return d
-}
-
-func (s *server) createBot(ctx context.Context, username, display, description string) (*mmBot, error) {
-	body := map[string]any{
-		"username":     username,
-		"display_name": display,
-		"description":  description,
-	}
-	var bot mmBot
-	if err := s.mmJSON(ctx, http.MethodPost, "/api/v4/bots", body, s.cfg.mmToken, &bot); err != nil {
-		return nil, err
-	}
-	return &bot, nil
-}
-
-// hideBotDirectChannel hides the admin↔bot DM from the registrar account's sidebar.
-//
-// Mattermost CreateBot synchronously opens a DM with the creating user and posts the
-// "add me to teams/channels" welcome message before returning the bot. That path also
-// sets direct_channel_show=true for the creator. Setting the preference here (after
-// createBot returns) therefore runs after that write — no delay is required. If a
-// future Mattermost version posts the welcome async and the sidebar entry reappears,
-// re-set the preference after the DM channel exists or after a short settle delay.
-func (s *server) hideBotDirectChannel(ctx context.Context, botUserID string) {
-	me, err := s.getMe(ctx, s.cfg.mmToken)
-	if err != nil || me == nil || me.ID == "" {
-		s.log.Warn("hide bot dm: get me", "err", err, "bot_user_id", botUserID)
-		return
-	}
-	prefs := []mmPreference{{
-		UserID:   me.ID,
-		Category: "direct_channel_show",
-		Name:     botUserID,
-		Value:    "false",
-	}}
-	if err := s.mmJSON(ctx, http.MethodPut, "/api/v4/users/me/preferences", prefs, s.cfg.mmToken, nil); err != nil {
-		s.log.Warn("hide bot dm", "err", err, "bot_user_id", botUserID, "admin_user_id", me.ID)
-	}
-}
-
-type mmPreference struct {
-	UserID   string `json:"user_id"`
-	Category string `json:"category"`
-	Name     string `json:"name"`
-	Value    string `json:"value"`
-}
-
-func (s *server) createAccessToken(ctx context.Context, userID, description string) (string, error) {
-	var tok mmToken
-	err := s.mmJSON(ctx, http.MethodPost, "/api/v4/users/"+userID+"/tokens", map[string]string{
-		"description": description,
-	}, s.cfg.mmToken, &tok)
-	if err != nil {
-		return "", err
-	}
-	if tok.Token == "" {
-		return "", errors.New("empty token")
-	}
-	return tok.Token, nil
-}
-
-func (s *server) getUserByUsername(ctx context.Context, username string) (*mmUser, error) {
-	var u mmUser
-	err := s.mmJSON(ctx, http.MethodGet, "/api/v4/users/username/"+username, nil, s.cfg.mmToken, &u)
-	if err != nil {
-		if isNotFound(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return &u, nil
-}
-
-func (s *server) getMe(ctx context.Context, token string) (*mmUser, error) {
-	var u mmUser
-	if err := s.mmJSON(ctx, http.MethodGet, "/api/v4/users/me", nil, token, &u); err != nil {
-		return nil, err
-	}
-	return &u, nil
-}
-
-func (s *server) revokeAllTokens(ctx context.Context, userID string) error {
-	var tokens []mmToken
-	if err := s.mmJSON(ctx, http.MethodGet, "/api/v4/users/"+userID+"/tokens?per_page=200", nil, s.cfg.mmToken, &tokens); err != nil {
-		return err
-	}
-	for _, t := range tokens {
-		_ = s.mmJSON(ctx, http.MethodPost, "/api/v4/users/tokens/revoke", map[string]string{"token_id": t.ID}, s.cfg.mmToken, nil)
-	}
-	return nil
-}
-
-func (s *server) disableBot(ctx context.Context, userID string) error {
-	return s.mmJSON(ctx, http.MethodPost, "/api/v4/bots/"+userID+"/disable", nil, s.cfg.mmToken, nil)
-}
-
-func (s *server) ensureTeamChannel(ctx context.Context, userID string) error {
-	var team struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	if err := s.mmJSON(ctx, http.MethodGet, "/api/v4/teams/name/"+s.cfg.defaultTeam, nil, s.cfg.mmToken, &team); err != nil {
-		return fmt.Errorf("team %q: %w", s.cfg.defaultTeam, err)
-	}
-	_ = s.mmJSON(ctx, http.MethodPost, "/api/v4/teams/"+team.ID+"/members", map[string]string{
-		"team_id": team.ID,
-		"user_id": userID,
-	}, s.cfg.mmToken, nil)
-
-	var ch struct {
-		ID string `json:"id"`
-	}
-	if err := s.mmJSON(ctx, http.MethodGet, "/api/v4/teams/"+team.ID+"/channels/name/"+s.cfg.defaultChannel, nil, s.cfg.mmToken, &ch); err != nil {
-		return fmt.Errorf("channel %q: %w", s.cfg.defaultChannel, err)
-	}
-	return s.mmJSON(ctx, http.MethodPost, "/api/v4/channels/"+ch.ID+"/members", map[string]string{
-		"user_id": userID,
-	}, s.cfg.mmToken, nil)
-}
-
-type httpError struct {
-	status int
-	body   string
-}
-
-func (e *httpError) Error() string { return fmt.Sprintf("mm api %d: %s", e.status, e.body) }
-
-func isNotFound(err error) bool {
-	var he *httpError
-	return errors.As(err, &he) && he.status == http.StatusNotFound
-}
-
-func (s *server) mmJSON(ctx context.Context, method, path string, body any, token string, out any) error {
-	var rdr io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		rdr = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, s.cfg.mmURL+path, rdr)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	res, err := s.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
-	if res.StatusCode >= 300 {
-		return &httpError{status: res.StatusCode, body: string(data)}
-	}
-	if out == nil || len(data) == 0 || string(data) == "null" {
-		return nil
-	}
-	return json.Unmarshal(data, out)
-}
-
 func bearer(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if !strings.HasPrefix(strings.ToLower(h), "bearer ") {
@@ -477,24 +307,18 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-func mustEnv(k string) string {
-	v := os.Getenv(k)
-	if v == "" {
-		slog.Error("missing env", "key", k)
-		os.Exit(1)
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
 	}
-	return v
+	return out
 }
 
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
-
-func envBool(k string, def bool) bool {
-	v := strings.TrimSpace(os.Getenv(k))
+func envBool(getenv func(string) string, k string, def bool) bool {
+	v := strings.TrimSpace(getenv(k))
 	if v == "" {
 		return def
 	}
