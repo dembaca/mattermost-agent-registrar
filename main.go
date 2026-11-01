@@ -18,7 +18,7 @@ import (
 )
 
 // version is the release; CHANGELOG.md and the image tag in CI follow it.
-const version = "0.3.0"
+const version = "0.4.0"
 
 // pruneEvery is how often the token store is pruned while running.
 const pruneEvery = time.Hour
@@ -31,6 +31,7 @@ type config struct {
 	pepper          string
 	mm              mattermost.Config
 	policy          core.Policy
+	attestor        *core.Attestor // nil: no attestation
 }
 
 type server struct {
@@ -56,6 +57,9 @@ func main() {
 	if err != nil {
 		log.Error("startup", "err", err)
 		os.Exit(1)
+	}
+	if cfg.attestor != nil {
+		log.Info("attestation on", "kid", cfg.attestor.Kid(), "ttl", cfg.attestor.TTL.String())
 	}
 	log.Info("listening", "version", version, "addr", cfg.listenAddr, "mattermost", cfg.mm.URL,
 		"shared_secret", cfg.policy.SharedSecret != "", "enrollment", s.svc.Store != nil)
@@ -143,6 +147,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if envBool(getenv, "ALLOW_SHARED_SECRET", true) {
 		cfg.policy.SharedSecret = env("REGISTRATION_SECRET", "")
 	}
+	cfg.attestor = loadAttestor(env, ttl, &errs)
 	p := cfg.policy
 	if p.DefaultTTL > p.MaxTTL {
 		errs = append(errs, errors.New("ENROLLMENT_DEFAULT_TTL exceeds ENROLLMENT_MAX_TTL"))
@@ -163,9 +168,47 @@ func loadConfig(getenv func(string) string) (config, error) {
 	return cfg, errors.Join(errs...)
 }
 
+// loadAttestor reads ATTESTATION_KEY or ATTESTATION_KEY_FILE and
+// ATTESTATION_TTL. No key means no attestation. Errors never carry the key.
+func loadAttestor(env func(k, def string) string, ttl func(k, def string) time.Duration, errs *[]error) *core.Attestor {
+	key, file := env("ATTESTATION_KEY", ""), env("ATTESTATION_KEY_FILE", "")
+	d := ttl("ATTESTATION_TTL", "30d")
+	if key != "" && file != "" {
+		*errs = append(*errs, errors.New("set ATTESTATION_KEY or ATTESTATION_KEY_FILE, not both"))
+		return nil
+	}
+	name := "ATTESTATION_KEY"
+	if file != "" {
+		name = "ATTESTATION_KEY_FILE"
+		b, err := os.ReadFile(file)
+		if err != nil {
+			*errs = append(*errs, fmt.Errorf("ATTESTATION_KEY_FILE: cannot read %s", file))
+			return nil
+		}
+		key = strings.TrimSpace(string(b))
+	}
+	if key == "" {
+		return nil
+	}
+	seed, err := core.ParseSeed(key)
+	if err != nil {
+		*errs = append(*errs, fmt.Errorf("%s: %v", name, err))
+		return nil
+	}
+	if d <= 0 {
+		return nil // the TTL error is already collected
+	}
+	a, err := core.NewAttestor(seed, d)
+	if err != nil {
+		*errs = append(*errs, fmt.Errorf("%s: %v", name, err))
+		return nil
+	}
+	return a
+}
+
 func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, error) {
 	port := &mattermost.Adapter{Cfg: cfg.mm, Client: client, Log: log}
-	svc := &core.Service{Provider: port, Policy: cfg.policy, Log: log}
+	svc := &core.Service{Provider: port, Policy: cfg.policy, Log: log, Attestor: cfg.attestor}
 	if len(cfg.mm.CommandTokens) > 0 {
 		st, err := core.OpenStore(cfg.enrollStore, []byte(cfg.pepper))
 		if err != nil {
@@ -181,6 +224,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("POST /register/v1/agents", s.handleRegister)
 	mux.HandleFunc("DELETE /register/v1/agents/{name}", s.handleUnregister)
+	mux.HandleFunc("GET /register/v1/keys", s.handleKeys)
 	if s.svc.Store != nil {
 		mux.HandleFunc("POST /register/v1/command", s.handleCommand)
 	}
@@ -198,6 +242,8 @@ type registerResp struct {
 	BotToken string `json:"bot_token"`
 	UserID   string `json:"user_id"`
 	Owner    string `json:"owner,omitempty"` // bound owner; absent for unbound bots
+	// Attestation is the signed owner claim; absent without ATTESTATION_KEY.
+	Attestation string `json:"attestation,omitempty"`
 }
 
 // fail maps a core error kind to a status; the message after the kind is
@@ -251,7 +297,27 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		BotToken: reg.Credential,
 		UserID:   reg.Agent.ID,
 		Owner:    reg.Owner,
+
+		Attestation: reg.Attestation,
 	})
+}
+
+// handleKeys publishes the attestation public key (RFC 8037 JWK set). Public;
+// empty without a key.
+func (s *server) handleKeys(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRate(clientIP(r)) {
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
+	keys := []core.JWK{}
+	if s.cfg.attestor != nil {
+		keys = append(keys, s.cfg.attestor.Key())
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "max-age=300")
+	_ = json.NewEncoder(w).Encode(struct {
+		Keys []core.JWK `json:"keys"`
+	}{keys})
 }
 
 func (s *server) handleUnregister(w http.ResponseWriter, r *http.Request) {

@@ -26,8 +26,9 @@ const (
 // The owner of a bound bot comes from its enrollment token. An unbound bot
 // (shared secret) records the caller's unchecked claim as "claims @…", never
 // as "for @…". Every name must be an existing human; others are left out.
-// "autonomous" appears only for that kind.
-func (s *Service) describe(ctx context.Context, owner *Human, claimed, kind string, trusted []string) string {
+// "autonomous" appears only for that kind. It also returns the trusted names
+// it wrote and how many it cut, which the attestation repeats.
+func (s *Service) describe(ctx context.Context, owner *Human, claimed, kind string, trusted []string) (string, []string, int) {
 	human := func(raw string) (string, bool) {
 		n := normHandle(raw)
 		if !userRE.MatchString(n) {
@@ -65,7 +66,7 @@ func (s *Service) describe(ctx context.Context, owner *Human, claimed, kind stri
 	if len(d) > maxDescLen {
 		d = d[:maxDescLen]
 	}
-	return d
+	return d, names, more
 }
 
 // trusted resolves up to Policy.MaxTrusted distinct human names and counts

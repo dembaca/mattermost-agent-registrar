@@ -55,6 +55,7 @@ type Service struct {
 	Store    *Store // nil: enrollment tokens are off
 	Policy   Policy
 	Log      *slog.Logger
+	Attestor *Attestor // nil: no attestation
 	Now      func() time.Time
 
 	enrollMu sync.Mutex // serialises enrollments, so MaxBots holds under concurrency
@@ -79,9 +80,10 @@ type RegisterRequest struct {
 
 // Registration is what a successful registration returns.
 type Registration struct {
-	Agent      Agent
-	Credential string
-	Owner      string // handle of the bound owner; "" when unbound
+	Agent       Agent
+	Credential  string
+	Owner       string // handle of the bound owner; "" when unbound
+	Attestation string // signed owner attestation; "" without an Attestor
 }
 
 func (s *Service) isSharedSecret(cred string) bool {
@@ -225,7 +227,7 @@ func (s *Service) Register(ctx context.Context, cred string, req RegisterRequest
 		return Registration{}, fmt.Errorf("%w: agent already registered", ErrConflict)
 	}
 
-	profile := s.describe(ctx, owner, req.Responsible, kind, req.Trusted)
+	profile, wrote, cut := s.describe(ctx, owner, req.Responsible, kind, req.Trusted)
 	agent, err := s.Provider.CreateAgent(ctx, username, display, profile)
 	if err != nil {
 		return Registration{}, fmt.Errorf("%w: create bot: %v", ErrUpstream, err)
@@ -239,7 +241,16 @@ func (s *Service) Register(ctx context.Context, cred string, req RegisterRequest
 		s.Log.Warn("team/channel invite", "err", err, "user_id", agent.ID)
 	}
 	out := Registration{Agent: agent, Credential: credential}
+	if kind == "" {
+		kind = "session" // the shared secret has no token to take a kind from
+	}
+	claims := AttestClaims{BotID: agent.ID, Username: agent.Username, Responsible: normHandle(req.Responsible),
+		Trusted: wrote, TrustedCut: cut, Kind: kind, Via: ViaSecret}
 	if owner == nil {
+		if out.Attestation, err = s.attest(claims); err != nil {
+			s.undo(ctx, agent)
+			return Registration{}, fmt.Errorf("attest: %w", err)
+		}
 		s.Log.Info("registered unbound agent", "username", username)
 		return out, nil
 	}
@@ -258,8 +269,20 @@ func (s *Service) Register(ctx context.Context, cred string, req RegisterRequest
 		s.Log.Warn("touch token", "err", err, "token_id", tok.ID)
 	}
 	out.Owner = owner.Handle
+	claims.Responsible, claims.Via = owner.Handle, ViaEnrollment
+	if out.Attestation, err = s.attest(claims); err != nil {
+		s.Log.Error("attest", "err", err, "username", username)
+	}
 	s.Log.Info("registered bound agent", "username", username, "owner", owner.Handle, "token_id", tok.ID)
 	return out, nil
+}
+
+// attest signs claims when an Attestor is configured.
+func (s *Service) attest(c AttestClaims) (string, error) {
+	if s.Attestor == nil {
+		return "", nil
+	}
+	return s.Attestor.Sign(c, s.now())
 }
 
 func (s *Service) undo(ctx context.Context, a Agent) {
