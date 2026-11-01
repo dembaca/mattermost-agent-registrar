@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0
+
+- **Signed owner attestation.** With `ATTESTATION_KEY` (or `ATTESTATION_KEY_FILE`)
+  set, `POST /register/v1/agents` adds `attestation`: an EdDSA compact JWS naming
+  the bot, the accepted owner (`responsible`), the written `trusted` list,
+  `trusted_cut`, `kind`, and `via` (`enrollment`: owner checked; `secret`: the
+  caller's claim). `ATTESTATION_TTL` (default `30d`) sets its lifetime.
+- **`GET /register/v1/keys`.** Public, rate limited; the Ed25519 public key as an
+  RFC 8037 JWK set, `{"keys":[]}` without a key.
+- Without a key nothing changes. An invalid key or TTL, or both key settings, is a
+  startup error; the key is never logged or returned, the `kid` is logged once.
+
 ## 0.3.0
 
 - **Revoking a token unregisters its bots.** `/agent-token revoke <id|all>` now

@@ -61,7 +61,8 @@ All fields but `name` are optional. The response:
 }
 ```
 
-`owner` is present only for a bound bot.
+`owner` is present only for a bound bot. `attestation` is present only when
+`ATTESTATION_KEY` is set (see [Owner attestation](#owner-attestation)).
 
 **With an enrollment token** (starts with `mmenr_`) the registrar:
 
@@ -107,6 +108,43 @@ is part of the interface:
   than the cap, the registrar stops checking and appends ` +N` (N further
   distinct names it did not write); with no name written that is `trusts @ +N`.
   The bus treats a cut list as foreign.
+
+### Owner attestation
+
+With an attestation key configured, a successful registration also returns
+`"attestation": "<jws>"`: a statement, signed by the registrar, of who it accepted
+as the bot's owner. A bus that pins the registrar's public key can verify it
+instead of trusting the bot description alone.
+
+`GET /register/v1/keys` (public, no auth, same rate limit) returns the public key
+as an RFC 8037 JWK, with `Cache-Control: max-age=300`:
+
+```json
+{"keys":[{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","use":"sig","kid":"…","x":"<base64url public key>"}]}
+```
+
+Without a key it returns `{"keys":[]}` and the register response has no
+`attestation` field.
+
+The token is a compact JWS (RFC 7515, base64url without padding), signed with
+EdDSA. The header is exactly
+`{"alg":"EdDSA","typ":"mm-agent-attestation+jwt","kid":"<kid>"}`; `kid` is the
+first 16 characters of base64url(sha256(raw 32-byte public key)). The payload
+is compact JSON with these claims, in this order:
+
+| Claim | Meaning |
+|-------|---------|
+| `bot_id` | Mattermost user id of the bot |
+| `username` | the bot's username |
+| `responsible` | the owner handle the registrar accepted. Enrollment token: the token's owner, also when the request left `responsible` out. Shared secret: the caller's `responsible` (normalised), or `""` |
+| `trusted` | exactly the names written into the description's `trusts`, after the `MAX_TRUSTED` cut and the existing-human filter |
+| `trusted_cut` | names left out by the cut; present only when greater than 0 |
+| `kind` | `session` or `autonomous` |
+| `via` | `enrollment`: an enrollment token was used, so the owner was checked. `secret`: the shared secret was used, and `responsible` is only the caller's claim |
+| `iat`, `exp` | unix seconds; `exp` is `iat` + `ATTESTATION_TTL` |
+
+A verifier must check the signature against a pinned key, the header, `exp`, and
+trust `responsible` as checked only when `via` is `enrollment`.
 
 ### Unregister
 
@@ -186,6 +224,9 @@ those bots stay bound and can still be removed with `revoke`.
 | `ENROLLMENT_MAX_TOKENS_PER_USER` | no | Default `20`. Active tokens one human may hold |
 | `ENROLLMENT_RETENTION` | no | Default `30d`. How long a revoked or expired token without live bots stays in the store before it is pruned; `0` prunes at the next pass (start, then hourly) |
 | `MAX_TRUSTED` | no | Default `10`. Trusted names written into a description; more are cut and marked `+N` |
+| `ATTESTATION_KEY` | no | Base64 or base64url (padding optional) of a 32-byte Ed25519 seed. Enables the `attestation` field and `GET /register/v1/keys`. Invalid: the registrar does not start. The `kid` is logged once at start; the key never is |
+| `ATTESTATION_KEY_FILE` | no | Path to a file holding the same value (whitespace around it is trimmed). Setting both this and `ATTESTATION_KEY` is a configuration error |
+| `ATTESTATION_TTL` | no | Default `30d`. Lifetime of an attestation (`d`, `w`, or Go durations like `12h`) |
 | `BOT_USERNAME_PREFIX` | no | Default `agent-` |
 | `DEFAULT_TEAM_NAME` | no | Default `ai-agents`. Team new bots join, and the team `--channels` names are looked up in; it must exist |
 | `DEFAULT_CHANNEL_NAME` | no | Default `agents`. Channel unbound bots join, and bound bots whose token names no channels; it must exist |
@@ -271,6 +312,14 @@ a bot, not where it can go later. Mattermost has no per-token scopes.
 
 **A leaked shared secret** registers unbound bots (visible as `unbound` and
 foreign to the bus) and unregisters any bot. Switch it off when you can.
+
+**A leaked attestation key** forges owner claims for every bus that pins it:
+anyone holding it can mint an attestation naming any owner, `via: enrollment`
+included. Keep it in `ATTESTATION_KEY_FILE` with tight permissions. Rotation
+means a new key plus re-pinning the new `kid` on each bus; old attestations stay
+valid on a bus that still pins the old key until `exp`. A `via: secret` claim is
+only the caller's word: the registrar signs what it was told, so a verifier must
+not treat `responsible` as checked unless `via` is `enrollment`.
 
 **Who can mint tokens:** any active, non-guest member of a team with the slash
 command. Mattermost authenticates the caller; the registrar checks the command

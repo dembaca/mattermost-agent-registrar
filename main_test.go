@@ -1,12 +1,15 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -14,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dembaca/mattermost-agent-registrar/internal/core"
 	"github.com/dembaca/mattermost-agent-registrar/internal/mattermost"
 )
 
@@ -182,6 +186,11 @@ func (f *fakeMM) server(t *testing.T) *httptest.Server {
 
 func newTestServer(t *testing.T, mm *fakeMM, enroll bool) *server {
 	t.Helper()
+	return newAttestingServer(t, mm, enroll, nil)
+}
+
+func newAttestingServer(t *testing.T, mm *fakeMM, enroll bool, att *core.Attestor) *server {
+	t.Helper()
 	ts := mm.server(t)
 	cfg := config{
 		publicChatURL:   "https://chat.example",
@@ -189,6 +198,7 @@ func newTestServer(t *testing.T, mm *fakeMM, enroll bool) *server {
 		mm: mattermost.Config{URL: ts.URL, Token: "admin-pat", Team: "ai-agents", HideBotDM: true,
 			TokenDescription: "agent-registrar"},
 	}
+	cfg.attestor = att
 	cfg.policy.BotPrefix = "agent-"
 	cfg.policy.DefaultChannel = "agents"
 	cfg.policy.SharedSecret = "secret"
@@ -354,5 +364,125 @@ func TestCommandEndpointOnlyWithEnrollment(t *testing.T) {
 	h := newTestServer(t, newFakeMM(), false).routes()
 	if rr := slash(h, "cmd-token", "u-alice", "create"); rr.Code != http.StatusNotFound && rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("command endpoint without enrollment: %d", rr.Code)
+	}
+}
+
+func testSeed() []byte {
+	s := make([]byte, 32)
+	for i := range s {
+		s[i] = byte(i)
+	}
+	return s
+}
+
+func testAttestor(t *testing.T) (*core.Attestor, ed25519.PublicKey) {
+	t.Helper()
+	a, err := core.NewAttestor(testSeed(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, ed25519.NewKeyFromSeed(testSeed()).Public().(ed25519.PublicKey)
+}
+
+func TestRegisterAttestsOverHTTP(t *testing.T) {
+	a, pub := testAttestor(t)
+	mm := newFakeMM()
+	h := newAttestingServer(t, mm, true, a).routes()
+	rr := slash(h, "cmd-token", "u-alice", "create --kind autonomous")
+	var reply struct{ Text string }
+	_ = json.Unmarshal(rr.Body.Bytes(), &reply)
+	secret := regexp.MustCompile(`mmenr_[A-Za-z0-9_-]+`).FindString(reply.Text)
+
+	check := func(auth, body, via, responsible string, trusted []string) {
+		t.Helper()
+		rr := post(h, "/register/v1/agents", auth, body)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: %d", body, rr.Code)
+		}
+		var resp registerResp
+		_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+		if resp.Attestation == "" || resp.BotToken == "" || resp.UserID == "" {
+			t.Fatalf("response lacks fields: user %q", resp.UserID)
+		}
+		c, err := core.VerifyAttestation(resp.Attestation, pub, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Via != via || c.Responsible != responsible || strings.Join(c.Trusted, ",") != strings.Join(trusted, ",") ||
+			c.TrustedCut != 0 || c.BotID != resp.UserID || c.Username != resp.Username {
+			t.Fatalf("claims: %+v", c)
+		}
+	}
+	check(secret, `{"name":"ops-1","kind":"autonomous","trusted":["kollegin","ghost"]}`, "enrollment", "dembaca", []string{"kollegin"})
+	check("secret", `{"name":"ops-2","responsible":"kollegin","trusted":["dembaca"]}`, "secret", "kollegin", []string{"dembaca"})
+	check("secret", `{"name":"ops-3"}`, "secret", "", []string{})
+}
+
+func TestNoKeyNoAttestationAndEmptyKeys(t *testing.T) {
+	h := newTestServer(t, newFakeMM(), false).routes()
+	rr := post(h, "/register/v1/agents", "secret", `{"name":"plain-1"}`)
+	var raw map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &raw)
+	if _, ok := raw["attestation"]; ok || rr.Code != http.StatusOK {
+		t.Fatalf("attestation present without key: %d %v", rr.Code, raw)
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/register/v1/keys", nil))
+	if rr.Code != http.StatusOK || strings.TrimSpace(rr.Body.String()) != `{"keys":[]}` {
+		t.Fatalf("keys: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestKeysEndpointShape(t *testing.T) {
+	a, pub := testAttestor(t)
+	h := newAttestingServer(t, newFakeMM(), false, a).routes()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/register/v1/keys", nil))
+	want := `{"keys":[{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","use":"sig","kid":"Vkdap1RjR0wChd9d","x":"` +
+		base64.RawURLEncoding.EncodeToString(pub) + `"}]}`
+	if rr.Code != http.StatusOK || strings.TrimSpace(rr.Body.String()) != want ||
+		rr.Header().Get("Cache-Control") != "max-age=300" || rr.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("keys: %d %s %v", rr.Code, rr.Body.String(), rr.Header())
+	}
+}
+
+func TestLoadConfigAttestation(t *testing.T) {
+	seed := base64.RawURLEncoding.EncodeToString(testSeed())
+	file := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(file, []byte("\n  "+seed+"= \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	load := func(extra map[string]string) (config, error) {
+		env := map[string]string{"MATTERMOST_URL": "http://mm", "MATTERMOST_TOKEN": "pat", "REGISTRATION_SECRET": "s"}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return loadConfig(func(k string) string { return env[k] })
+	}
+	if cfg, err := load(nil); err != nil || cfg.attestor != nil {
+		t.Fatalf("no key: %v", err)
+	}
+	cfg, err := load(map[string]string{"ATTESTATION_KEY": seed})
+	if err != nil || cfg.attestor == nil || cfg.attestor.Kid() != "Vkdap1RjR0wChd9d" || cfg.attestor.TTL != 30*24*time.Hour {
+		t.Fatalf("key: %v", err)
+	}
+	cfg, err = load(map[string]string{"ATTESTATION_KEY_FILE": file, "ATTESTATION_TTL": "12h"})
+	if err != nil || cfg.attestor == nil || cfg.attestor.Kid() != "Vkdap1RjR0wChd9d" || cfg.attestor.TTL != 12*time.Hour {
+		t.Fatalf("key file: %v", err)
+	}
+	for name, extra := range map[string]map[string]string{
+		"bad key":      {"ATTESTATION_KEY": "not-a-key"},
+		"short key":    {"ATTESTATION_KEY": "AAEC"},
+		"both":         {"ATTESTATION_KEY": seed, "ATTESTATION_KEY_FILE": file},
+		"bad ttl":      {"ATTESTATION_KEY": seed, "ATTESTATION_TTL": "soon"},
+		"missing file": {"ATTESTATION_KEY_FILE": file + ".none"},
+	} {
+		_, err := load(extra)
+		if err == nil || !strings.Contains(err.Error(), "ATTESTATION") {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if strings.Contains(err.Error(), seed) || strings.Contains(err.Error(), "not-a-key") {
+			t.Fatalf("%s: error echoes the key", name)
+		}
 	}
 }
