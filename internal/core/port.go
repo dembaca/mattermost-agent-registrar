@@ -21,12 +21,13 @@ type Agent struct {
 	Username string
 }
 
-// Invocation is a verified call of the token command: the provider vouches
-// for who typed it.
+// Invocation is a verified call of a slash command (/agent-token,
+// /agent-mode): the provider vouches for who typed it.
 type Invocation struct {
-	Human   Human
-	Command string // the trigger as typed, e.g. "/agent-token"; used in help texts only
-	Text    string // everything after the trigger
+	Human     Human
+	Command   string // the trigger as typed, e.g. "/agent-token"; used in help texts only
+	Text      string // everything after the trigger
+	ChannelID string // provider id of the channel it was typed in
 }
 
 // ProviderPort is everything the protocol needs from a chat provider.
@@ -48,6 +49,10 @@ type ProviderPort interface {
 	// registrar's team): member of it, or member of the team and the channel
 	// is public. ErrNoSuchChannel when the channel does not exist.
 	HumanCanAccess(ctx context.Context, h Human, channel string) (bool, error)
+	// HumanInChannel says whether h is a member of the channel with provider
+	// id channelID. ErrNoSuchChannel when it does not exist, ErrNotTeamChannel
+	// when it is a direct or group message.
+	HumanInChannel(ctx context.Context, h Human, channelID string) (bool, error)
 	// FindAgent finds an account by username; nil when there is none.
 	FindAgent(ctx context.Context, username string) (*Agent, error)
 	// AgentForCredential returns the account a credential (bot token) belongs to.

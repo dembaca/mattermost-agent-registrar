@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0
+
+- **`/agent-mode`: the ask mode per channel, signed** (ADR-005 phase 2 of the
+  agent bus). A member of a team channel sets `direct` or `coordinator` with a
+  new slash command on `POST /register/v1/mode`, verified with its own
+  `MODE_COMMAND_TOKEN`; `status` (or no argument) shows it, `delegated` answers
+  "not available yet (ADR-005 phase 3)". Direct and group messages and
+  non-members are refused; every answer is private, every change logged.
+- **`GET /register/v1/modes/{channel_id}`.** Public, its own rate bucket (120/min
+  per IP): `{"record":"<jws>"}`, signed fresh with the attestation key, header
+  `typ` `mm-agent-mode+jwt`, claims `channel_id`, `mode`, `set_by`, `set_by_id`,
+  `set_at_ms`, `iat`, `exp` (1 h). `404` when no mode is set, `400` for an
+  invalid id. Only with an attestation key.
+- Modes live in their own store, `MODE_STORE` (default `/data/modes.json`, 0600,
+  atomic), and need no enrollment tokens. `MODE_COMMAND_TOKEN` without an
+  attestation key is a startup error.
+- Attestation and mode records share one signing helper; attestations are
+  byte-identical to 0.4.0. The slash command refusal for bots and guests now says
+  "can use this command" instead of naming enrollment tokens.
+
 ## 0.4.0
 
 - **Signed owner attestation.** With `ATTESTATION_KEY` (or `ATTESTATION_KEY_FILE`)

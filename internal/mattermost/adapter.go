@@ -24,7 +24,7 @@ type Config struct {
 	Token            string   // admin personal access token
 	Team             string   // team bots join; channels are names in it
 	HideBotDM        bool     // hide the admin↔bot welcome DM
-	CommandTokens    []string // verification tokens of the slash command(s)
+	CommandTokens    []string // verification tokens of the slash command(s) this adapter verifies
 	TokenDescription string   // description of the bot access tokens it mints
 }
 
@@ -112,12 +112,13 @@ func (m *Adapter) VerifyInvocation(r *http.Request) (core.Invocation, error) {
 		return core.Invocation{}, fmt.Errorf("%w: user: %v", core.ErrUpstream, err)
 	}
 	if !u.human() || u.guest() {
-		return core.Invocation{}, fmt.Errorf("%w: only active members (no bots, no guests) can create enrollment tokens", core.ErrForbidden)
+		return core.Invocation{}, fmt.Errorf("%w: only active members (no bots, no guests) can use this command", core.ErrForbidden)
 	}
 	return core.Invocation{
-		Human:   core.Human{ID: u.ID, Handle: strings.ToLower(u.Username)},
-		Command: r.PostForm.Get("command"),
-		Text:    r.PostForm.Get("text"),
+		Human:     core.Human{ID: u.ID, Handle: strings.ToLower(u.Username)},
+		Command:   r.PostForm.Get("command"),
+		Text:      r.PostForm.Get("text"),
+		ChannelID: r.PostForm.Get("channel_id"),
 	}, nil
 }
 
@@ -174,7 +175,7 @@ type team struct {
 
 type channel struct {
 	ID   string `json:"id"`
-	Type string `json:"type"` // O public, P private
+	Type string `json:"type"` // O public, P private, D direct, G group message
 }
 
 type member struct {
@@ -222,6 +223,29 @@ func (m *Adapter) HumanCanAccess(ctx context.Context, h core.Human, name string)
 		return false, err
 	}
 	return ch.Type == "O", nil
+}
+
+// HumanInChannel: the channel (by id) is a team channel (public or private)
+// and h is a member of it. Direct and group messages are refused.
+func (m *Adapter) HumanInChannel(ctx context.Context, h core.Human, channelID string) (bool, error) {
+	var ch channel
+	if err := m.do(ctx, http.MethodGet, "/api/v4/channels/"+url.PathEscape(channelID), nil, m.Cfg.Token, &ch); err != nil {
+		if isNotFound(err) {
+			return false, core.ErrNoSuchChannel
+		}
+		return false, err
+	}
+	if ch.Type != "O" && ch.Type != "P" {
+		return false, core.ErrNotTeamChannel
+	}
+	err := m.do(ctx, http.MethodGet, "/api/v4/channels/"+url.PathEscape(channelID)+"/members/"+url.PathEscape(h.ID), nil, m.Cfg.Token, nil)
+	if err == nil {
+		return true, nil
+	}
+	if isNotFound(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 // FindAgent finds an account by username.

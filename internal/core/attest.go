@@ -108,11 +108,17 @@ func (a *Attestor) SignExact(c AttestClaims) (string, error) {
 	if c.Trusted == nil {
 		c.Trusted = []string{}
 	}
-	payload, err := json.Marshal(c)
+	return a.signJWS(attestTyp, c)
+}
+
+// signJWS signs claims as a compact JWS with header typ. Each record kind has
+// its own typ, so a verifier of one kind never accepts another.
+func (a *Attestor) signJWS(typ string, claims any) (string, error) {
+	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", err
 	}
-	header := `{"alg":"EdDSA","typ":"` + attestTyp + `","kid":"` + a.kid + `"}`
+	header := `{"alg":"EdDSA","typ":"` + typ + `","kid":"` + a.kid + `"}`
 	in := b64.EncodeToString([]byte(header)) + "." + b64.EncodeToString(payload)
 	return in + "." + b64.EncodeToString(ed25519.Sign(a.priv, []byte(in))), nil
 }
@@ -121,31 +127,40 @@ func (a *Attestor) SignExact(c AttestClaims) (string, error) {
 // against pub and returns its claims.
 func VerifyAttestation(token string, pub ed25519.PublicKey, now time.Time) (AttestClaims, error) {
 	var c AttestClaims
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return c, errors.New("not a compact JWS")
-	}
-	hb, err := b64.DecodeString(parts[0])
-	if err != nil {
-		return c, errors.New("bad header encoding")
-	}
-	want := `{"alg":"EdDSA","typ":"` + attestTyp + `","kid":"` + Kid(pub) + `"}`
-	if subtle.ConstantTimeCompare(hb, []byte(want)) != 1 {
-		return c, errors.New("unexpected header")
-	}
-	sig, err := b64.DecodeString(parts[2])
-	if err != nil || !ed25519.Verify(pub, []byte(parts[0]+"."+parts[1]), sig) {
-		return c, errors.New("bad signature")
-	}
-	pb, err := b64.DecodeString(parts[1])
-	if err != nil {
-		return c, errors.New("bad payload encoding")
-	}
-	if err := json.Unmarshal(pb, &c); err != nil {
-		return c, fmt.Errorf("bad payload: %w", err)
+	if err := verifyJWS(token, attestTyp, pub, &c); err != nil {
+		return c, err
 	}
 	if now.Unix() >= c.Exp {
 		return c, errors.New("expired")
 	}
 	return c, nil
+}
+
+// verifyJWS checks the header (exactly typ and pub's kid) and the signature
+// of token, and decodes its payload into out.
+func verifyJWS(token, typ string, pub ed25519.PublicKey, out any) error {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return errors.New("not a compact JWS")
+	}
+	hb, err := b64.DecodeString(parts[0])
+	if err != nil {
+		return errors.New("bad header encoding")
+	}
+	want := `{"alg":"EdDSA","typ":"` + typ + `","kid":"` + Kid(pub) + `"}`
+	if subtle.ConstantTimeCompare(hb, []byte(want)) != 1 {
+		return errors.New("unexpected header")
+	}
+	sig, err := b64.DecodeString(parts[2])
+	if err != nil || !ed25519.Verify(pub, []byte(parts[0]+"."+parts[1]), sig) {
+		return errors.New("bad signature")
+	}
+	pb, err := b64.DecodeString(parts[1])
+	if err != nil {
+		return errors.New("bad payload encoding")
+	}
+	if err := json.Unmarshal(pb, out); err != nil {
+		return fmt.Errorf("bad payload: %w", err)
+	}
+	return nil
 }
