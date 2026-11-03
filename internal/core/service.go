@@ -20,6 +20,10 @@ var (
 	ErrConflict      = errors.New("conflict")
 	ErrUpstream      = errors.New("provider error")
 	ErrNoSuchChannel = errors.New("no such channel")
+	// ErrNotTeamChannel: a direct or group message, not a team channel.
+	ErrNotTeamChannel = errors.New("not a team channel")
+	// ErrNoMode: no ask mode is set for the channel.
+	ErrNoMode = errors.New("no mode set")
 )
 
 var (
@@ -49,13 +53,14 @@ type Policy struct {
 }
 
 // Service runs the protocol: registration (shared secret or enrollment
-// token), unregistration and the token command.
+// token), unregistration, the token command and the ask mode per channel.
 type Service struct {
 	Provider ProviderPort
 	Store    *Store // nil: enrollment tokens are off
 	Policy   Policy
 	Log      *slog.Logger
-	Attestor *Attestor // nil: no attestation
+	Attestor *Attestor  // nil: no attestation, no mode records
+	Modes    *ModeStore // nil: no ask modes per channel
 	Now      func() time.Time
 
 	enrollMu sync.Mutex // serialises enrollments, so MaxBots holds under concurrency

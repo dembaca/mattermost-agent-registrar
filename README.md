@@ -201,6 +201,61 @@ with it is still live; until then `list` counts it as expired or revoked. The
 registrar prunes at start and then hourly. A token with live bots stays, so
 those bots stay bound and can still be removed with `revoke`.
 
+### Ask mode per channel: `/agent-mode`
+
+ADR-005 of the agent bus lets a human say, per team channel, how the agents in it
+route their questions. The registrar stores that choice and publishes it as a
+signed record; the bus reads it from there.
+
+In a team channel (public or private) a member types:
+
+| Command | Effect |
+|---------|--------|
+| `/agent-mode` or `/agent-mode status` | the channel's mode, who set it and when, or "not set" (agents then use their default, `direct` unless configured otherwise) |
+| `/agent-mode direct` | agents ask humans directly |
+| `/agent-mode coordinator` | agents ask the coordinator first; approvals still go to a human |
+| `/agent-mode delegated` | not available yet (ADR-005 phase 3) |
+
+Anything else shows the help. Every answer is private to the caller. The channel
+is the one the command is typed in; direct and group messages are refused, and
+only members of the channel (active, no bots, no guests) can read or set its
+mode. Setting the same mode again records the new setter and time. Each change
+is logged with the setter's handle, the channel id and the mode.
+
+`GET /register/v1/modes/{channel_id}` (public, no auth) returns the current mode
+as a record signed for this request:
+
+| Status | Body |
+|--------|------|
+| `200` | `{"record":"<jws>"}` |
+| `404` | `{"error":"no mode set"}` |
+| `400` | `{"error":"invalid channel id"}`: not 26 characters of `[a-z0-9]` |
+
+It has its own rate bucket (120 requests per minute per IP), so agents polling
+their channels never starve registrations, and sends `Cache-Control: no-store`.
+The route exists only with an attestation key; without `MODE_COMMAND_TOKEN` it
+still publishes the modes set earlier.
+
+The record is a compact JWS signed with the attestation key (same `kid` as in
+`GET /register/v1/keys`). The header is exactly
+`{"alg":"EdDSA","typ":"mm-agent-mode+jwt","kid":"<kid>"}`: its own `typ`, so a
+mode record never passes as an attestation or the other way round. The payload is
+compact JSON with these claims, in this order:
+
+| Claim | Meaning |
+|-------|---------|
+| `channel_id` | Mattermost channel id |
+| `mode` | `direct` or `coordinator` |
+| `set_by` | the setter's username, lower case, without `@` |
+| `set_by_id` | the setter's Mattermost user id |
+| `set_at_ms` | when the human set it, unix **milliseconds** |
+| `iat`, `exp` | unix seconds; signed fresh for each request, `exp` is `iat` + 1 h (independent of `ATTESTATION_TTL`) |
+
+The bus accepts a record only with the registrar's keys pinned and only when
+`set_by` is a human the agent's session trusts; the endpoint itself is never
+trusted, only the signature.
+The record names who set the mode; anyone who knows a channel id can read it.
+
 ### Health
 
 `GET /healthz` → `ok`
@@ -227,6 +282,8 @@ those bots stay bound and can still be removed with `revoke`.
 | `ATTESTATION_KEY` | no | Base64 or base64url (padding optional) of a 32-byte Ed25519 seed. Enables the `attestation` field and `GET /register/v1/keys`. Invalid: the registrar does not start. The `kid` is logged once at start; the key never is |
 | `ATTESTATION_KEY_FILE` | no | Path to a file holding the same value (whitespace around it is trimmed). Setting both this and `ATTESTATION_KEY` is a configuration error |
 | `ATTESTATION_TTL` | no | Default `30d`. Lifetime of an attestation (`d`, `w`, or Go durations like `12h`) |
+| `MODE_COMMAND_TOKEN` | no | Verification token of the `/agent-mode` slash command; comma-separated for one command per team. Enables `POST /register/v1/mode`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of `SLASH_COMMAND_TOKEN` and `ENROLLMENT_PEPPER` |
+| `MODE_STORE` | no | Default `/data/modes.json`. The mode per channel, its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `BOT_USERNAME_PREFIX` | no | Default `agent-` |
 | `DEFAULT_TEAM_NAME` | no | Default `ai-agents`. Team new bots join, and the team `--channels` names are looked up in; it must exist |
 | `DEFAULT_CHANNEL_NAME` | no | Default `agents`. Channel unbound bots join, and bound bots whose token names no channels; it must exist |
@@ -267,6 +324,23 @@ first, and use the same names as `MM_TEAM` and `MM_CHANNEL` in the bus plugin.
 7. A human runs `/agent-token create --label laptop` and gives the token to the
    agent as its registration credential: the bus's `MM_REG_SECRET`, unchanged in
    name, sent as the same `Bearer` header.
+
+## Setup for `/agent-mode`
+
+1. **Configure an attestation key** (`ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`):
+   the records are signed with it. Pin its public key in the bus.
+2. **Create the slash command.** *Integrations → Slash Commands → Add* in the
+   team(s) whose channels get modes: trigger word `agent-mode` (or any other),
+   request URL `https://<registrar>/register/v1/mode`, method `POST`, autocomplete
+   on with the hint `[status | direct | coordinator]`. Mattermost must reach the
+   registrar (step 1 of the [enrollment setup](#setup-for-enrollment-tokens)).
+3. **Copy the command's token into `MODE_COMMAND_TOKEN`** (comma-separate the
+   tokens of several teams). It is a separate command with its own token: the
+   `/agent-token` token does not verify it, nor the other way round.
+4. **Mount a volume for `MODE_STORE`** (the default `/data/modes.json` sits next
+   to the token store).
+5. Agents fetch `GET <registrar>/register/v1/modes/{channel_id}` for their
+   channels and verify the record as described [above](#ask-mode-per-channel-agent-mode).
 
 ## Migration from the shared secret
 
@@ -351,7 +425,9 @@ docker run --rm -p 8080:8080 \
   -e ENROLLMENT_PEPPER=... \
   -e ENROLLMENT_RETENTION=30d \
   -e REGISTRATION_SECRET=... \
-  ghcr.io/dembaca/mattermost-agent-registrar:0.3.0
+  -e ATTESTATION_KEY_FILE=/run/secrets/attestation-key \
+  -e MODE_COMMAND_TOKEN=... \
+  ghcr.io/dembaca/mattermost-agent-registrar:0.5.0
 ```
 
 Serve `/register/v1/` on the same host as Mattermost (for example
@@ -364,7 +440,8 @@ the token store is a local file.
 
 - `main.go`: configuration from the environment, HTTP handlers, rate limit.
 - `internal/core`: the provider-neutral protocol: enrollment tokens and their
-  store, scope and policy, the bot description, the `/agent-token` command. It
+  store, scope and policy, the bot description, the `/agent-token` command, the
+  owner attestation and the `/agent-mode` command with its store and record. It
   talks to the chat system only through `core.ProviderPort` and imports no
   provider (a test checks this).
 - `internal/mattermost`: the Mattermost adapter implementing `ProviderPort`
@@ -374,8 +451,8 @@ the token store is a local file.
 ## Image
 
 ```bash
-docker build -t ghcr.io/dembaca/mattermost-agent-registrar:0.3.0 .
-docker push ghcr.io/dembaca/mattermost-agent-registrar:0.3.0
+docker build -t ghcr.io/dembaca/mattermost-agent-registrar:0.5.0 .
+docker push ghcr.io/dembaca/mattermost-agent-registrar:0.5.0
 ```
 
 CI (`.github/workflows/build.yml`) runs gofmt, `go vet` and `go test -race`, and

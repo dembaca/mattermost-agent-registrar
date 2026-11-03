@@ -116,3 +116,69 @@ func TestVerifyInvocationRefusesGuests(t *testing.T) {
 		t.Fatalf("guest: %v", err)
 	}
 }
+
+func TestHumanInChannel(t *testing.T) {
+	mux := http.NewServeMux()
+	types := map[string]string{"pub": "O", "priv": "P", "dm": "D", "grp": "G"}
+	mux.HandleFunc("GET /api/v4/channels/{cid}", func(w http.ResponseWriter, r *http.Request) {
+		typ, ok := types[r.PathValue("cid")]
+		if !ok {
+			http.NotFound(w, nil)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"` + r.PathValue("cid") + `","type":"` + typ + `"}`))
+	})
+	mux.HandleFunc("GET /api/v4/channels/{cid}/members/{uid}", func(w http.ResponseWriter, r *http.Request) {
+		switch r.PathValue("uid") {
+		case "member":
+			_, _ = w.Write([]byte(`{}`))
+		case "broken":
+			http.Error(w, "boom", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, nil)
+		}
+	})
+	m := adapter(t, mux)
+	ctx := context.Background()
+	for _, c := range []struct {
+		user, ch string
+		want     bool
+	}{
+		{"member", "pub", true},
+		{"member", "priv", true},
+		{"other", "pub", false}, // public, but not a member
+		{"other", "priv", false},
+	} {
+		got, err := m.HumanInChannel(ctx, core.Human{ID: c.user}, c.ch)
+		if err != nil || got != c.want {
+			t.Errorf("%s in %s: got %v %v, want %v", c.user, c.ch, got, err, c.want)
+		}
+	}
+	for _, ch := range []string{"dm", "grp"} {
+		if _, err := m.HumanInChannel(ctx, core.Human{ID: "member"}, ch); !errors.Is(err, core.ErrNotTeamChannel) {
+			t.Errorf("%s: %v", ch, err)
+		}
+	}
+	if _, err := m.HumanInChannel(ctx, core.Human{ID: "member"}, "nope"); !errors.Is(err, core.ErrNoSuchChannel) {
+		t.Errorf("missing channel: %v", err)
+	}
+	if _, err := m.HumanInChannel(ctx, core.Human{ID: "broken"}, "pub"); err == nil || errors.Is(err, core.ErrNoSuchChannel) {
+		t.Errorf("upstream error: %v", err)
+	}
+}
+
+func TestVerifyInvocationCarriesChannel(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v4/users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(User{ID: r.PathValue("id"), Username: "Alice"})
+	})
+	m := adapter(t, mux)
+	m.Cfg.CommandTokens = []string{"mode-cmd"}
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.PostForm = map[string][]string{"token": {"mode-cmd"}, "user_id": {"u1"}, "channel_id": {"c1"},
+		"command": {"/agent-mode"}, "text": {"status"}}
+	inv, err := m.VerifyInvocation(req)
+	if err != nil || inv.ChannelID != "c1" || inv.Human.Handle != "alice" || inv.Command != "/agent-mode" || inv.Text != "status" {
+		t.Fatalf("%+v %v", inv, err)
+	}
+}

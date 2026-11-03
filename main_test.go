@@ -101,6 +101,8 @@ type fakeMM struct {
 	assigned    map[string]string          // bot id -> owner id
 	prefsFail   bool
 	channelType string
+	chanTypes   map[string]string // channel id -> type, for GET /api/v4/channels/{id}
+	chanMembers map[string]bool   // "channel id/user id"
 }
 
 func (f *fakeMM) server(t *testing.T) *httptest.Server {
@@ -175,8 +177,24 @@ func (f *fakeMM) server(t *testing.T) *httptest.Server {
 	mux.HandleFunc("GET /api/v4/teams/team-id/channels/name/{ch}", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"ch-` + r.PathValue("ch") + `","type":"` + f.channelType + `"}`))
 	})
-	mux.HandleFunc("GET /api/v4/channels/{ch}/members/{uid}", func(w http.ResponseWriter, _ *http.Request) {
-		http.NotFound(w, nil) // nobody is a channel member; public channels still pass
+	mux.HandleFunc("GET /api/v4/channels/{ch}/members/{uid}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.chanMembers[r.PathValue("ch")+"/"+r.PathValue("uid")] {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		http.NotFound(w, nil) // otherwise nobody is a channel member; public channels still pass
+	})
+	mux.HandleFunc("GET /api/v4/channels/{ch}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		typ, ok := f.chanTypes[r.PathValue("ch")]
+		if !ok {
+			http.NotFound(w, nil)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"` + r.PathValue("ch") + `","type":"` + typ + `"}`))
 	})
 	mux.HandleFunc("POST /api/v4/channels/{ch}/members", func(http.ResponseWriter, *http.Request) {})
 	ts := httptest.NewServer(mux)
@@ -484,5 +502,228 @@ func TestLoadConfigAttestation(t *testing.T) {
 		if strings.Contains(err.Error(), seed) || strings.Contains(err.Error(), "not-a-key") {
 			t.Fatalf("%s: error echoes the key", name)
 		}
+	}
+}
+
+const (
+	modeChan = "c0000000000000000000000000" // public; dembaca (u-alice) is a member
+	modeDM   = "d0000000000000000000000000"
+)
+
+func newModeServer(t *testing.T, mm *fakeMM, att *core.Attestor, modeTokens []string) *server {
+	t.Helper()
+	return newModeServerEnroll(t, mm, att, modeTokens, false)
+}
+
+func newModeServerEnroll(t *testing.T, mm *fakeMM, att *core.Attestor, modeTokens []string, enroll bool) *server {
+	t.Helper()
+	mm.chanTypes = map[string]string{modeChan: "O", modeDM: "D"}
+	mm.chanMembers = map[string]bool{modeChan + "/u-alice": true, modeDM + "/u-alice": true}
+	ts := mm.server(t)
+	cfg := config{
+		publicChatURL:       "https://chat.example",
+		rateLimitPerMin:     100,
+		modeRateLimitPerMin: 100,
+		modeTokens:          modeTokens,
+		modeStore:           filepath.Join(t.TempDir(), "modes.json"),
+		attestor:            att,
+		mm:                  mattermost.Config{URL: ts.URL, Token: "admin-pat", Team: "ai-agents", TokenDescription: "agent-registrar"},
+	}
+	cfg.policy.SharedSecret = "secret"
+	if enroll {
+		cfg.mm.CommandTokens = []string{"cmd-token"}
+		cfg.pepper = strings.Repeat("p", 32)
+		cfg.enrollStore = filepath.Join(t.TempDir(), "enrollments.json")
+	}
+	s, err := newServer(cfg, ts.Client(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func modeSlash(h http.Handler, token, userID, channelID, text string) *httptest.ResponseRecorder {
+	form := url.Values{"token": {token}, "user_id": {userID}, "channel_id": {channelID}, "team_id": {"team-id"},
+		"command": {"/agent-mode"}, "text": {text}}
+	req := httptest.NewRequest(http.MethodPost, "/register/v1/mode", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+func ephemeral(t *testing.T, rr *httptest.ResponseRecorder) string {
+	t.Helper()
+	var reply struct {
+		ResponseType string `json:"response_type"`
+		Text         string `json:"text"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &reply); err != nil || reply.ResponseType != "ephemeral" {
+		t.Fatalf("not an ephemeral reply: %d %s", rr.Code, rr.Body.String())
+	}
+	return reply.Text
+}
+
+func getMode(h http.Handler, id string) *httptest.ResponseRecorder {
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/register/v1/modes/"+id, nil))
+	return rr
+}
+
+func TestModeCommandAndRecordOverHTTP(t *testing.T) {
+	a, pub := testAttestor(t)
+	mm := newFakeMM()
+	// Modes work without enrollment tokens (no SLASH_COMMAND_TOKEN, no pepper).
+	h := newModeServer(t, mm, a, []string{"mode-a", "mode-b"}).routes()
+
+	for _, tok := range []string{"wrong", ""} {
+		if rr := modeSlash(h, tok, "u-alice", modeChan, "coordinator"); rr.Code != http.StatusUnauthorized {
+			t.Fatalf("token %q: %d %s", tok, rr.Code, rr.Body.String())
+		}
+	}
+	if txt := ephemeral(t, modeSlash(h, "mode-a", "b2", modeChan, "coordinator")); !strings.Contains(txt, "no bots") {
+		t.Fatalf("bot: %s", txt)
+	}
+	if rr := getMode(h, modeChan); rr.Code != http.StatusNotFound || strings.TrimSpace(rr.Body.String()) != `{"error":"no mode set"}` {
+		t.Fatalf("unset: %d %s", rr.Code, rr.Body.String())
+	}
+	if txt := ephemeral(t, modeSlash(h, "mode-a", "u-alice", modeChan, "")); !strings.Contains(txt, "not set") {
+		t.Fatalf("status: %s", txt)
+	}
+	if txt := ephemeral(t, modeSlash(h, "mode-b", "u-alice", modeDM, "coordinator")); !strings.Contains(txt, "direct or group") {
+		t.Fatalf("dm: %s", txt)
+	}
+	if txt := ephemeral(t, modeSlash(h, "mode-a", "u2", modeChan, "coordinator")); !strings.Contains(txt, "Only members") {
+		t.Fatalf("non-member: %s", txt)
+	}
+	if txt := ephemeral(t, modeSlash(h, "mode-a", "u-alice", modeChan, "delegated")); !strings.Contains(txt, "ADR-005 phase 3") {
+		t.Fatalf("delegated: %s", txt)
+	}
+	if txt := ephemeral(t, modeSlash(h, "mode-a", "u-alice", modeChan, "please")); !strings.Contains(txt, "/agent-mode coordinator") {
+		t.Fatalf("help: %s", txt)
+	}
+	if rr := getMode(h, modeChan); rr.Code != http.StatusNotFound {
+		t.Fatalf("refused calls stored a mode: %d", rr.Code)
+	}
+
+	before := time.Now()
+	if txt := ephemeral(t, modeSlash(h, "mode-b", "u-alice", modeChan, "coordinator")); !strings.Contains(txt, "now `coordinator`") {
+		t.Fatalf("set: %s", txt)
+	}
+	rr := getMode(h, modeChan)
+	var body struct {
+		Record string `json:"record"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil || rr.Code != http.StatusOK || body.Record == "" ||
+		rr.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("get: %d", rr.Code)
+	}
+	c, err := core.VerifyMode(body.Record, pub, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ChannelID != modeChan || c.Mode != "coordinator" || c.SetBy != "dembaca" || c.SetByID != "u-alice" ||
+		c.SetAtMs < before.UnixMilli() || c.SetAtMs > time.Now().UnixMilli() || c.Exp-c.Iat != 3600 {
+		t.Fatalf("claims: %+v", c)
+	}
+	if _, err := core.VerifyAttestation(body.Record, pub, time.Now()); err == nil {
+		t.Fatal("mode record verifies as an attestation")
+	}
+	if txt := ephemeral(t, modeSlash(h, "mode-a", "u-alice", modeChan, "status")); !strings.Contains(txt, "`coordinator`, set by @dembaca") {
+		t.Fatalf("status after set: %s", txt)
+	}
+
+	for _, id := range []string{"short", "C0000000000000000000000000", "c00000000000000000000000000", "c000000000000000000000000_"} {
+		if rr := getMode(h, id); rr.Code != http.StatusBadRequest {
+			t.Fatalf("%q: %d", id, rr.Code)
+		}
+	}
+}
+
+func TestModeRecordHasItsOwnRateBucket(t *testing.T) {
+	a, _ := testAttestor(t)
+	s := newModeServer(t, newFakeMM(), a, nil)
+	s.rate, s.modeRate = newLimiter(2), newLimiter(3)
+	h := s.routes()
+	for i := 0; i < 3; i++ {
+		if rr := getMode(h, modeChan); rr.Code != http.StatusNotFound {
+			t.Fatalf("mode get %d: %d", i, rr.Code)
+		}
+	}
+	if rr := getMode(h, modeChan); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("mode bucket not enforced: %d", rr.Code)
+	}
+	for i := 0; i < 2; i++ {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/register/v1/keys", nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("keys %d after the mode bucket ran out: %d", i, rr.Code)
+		}
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/register/v1/keys", nil))
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("main bucket not enforced: %d", rr.Code)
+	}
+}
+
+func TestModeRoutesFollowConfig(t *testing.T) {
+	a, _ := testAttestor(t)
+	gone := func(rr *httptest.ResponseRecorder) bool {
+		return rr.Code == http.StatusNotFound || rr.Code == http.StatusMethodNotAllowed
+	}
+	// No attestation key: neither route.
+	h := newModeServer(t, newFakeMM(), nil, nil).routes()
+	if rr := getMode(h, modeChan); rr.Code != http.StatusNotFound || strings.Contains(rr.Body.String(), "no mode set") {
+		t.Fatalf("GET without key: %d %s", rr.Code, rr.Body.String())
+	}
+	if !gone(modeSlash(h, "mode-a", "u-alice", modeChan, "status")) {
+		t.Fatal("command without key")
+	}
+	// Each command takes only its own verification tokens.
+	h = newModeServerEnroll(t, newFakeMM(), a, []string{"mode-a"}, true).routes()
+	if rr := modeSlash(h, "cmd-token", "u-alice", modeChan, "status"); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("token command's token on the mode command: %d", rr.Code)
+	}
+	if rr := slash(h, "mode-a", "u-alice", "list"); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("mode command's token on the token command: %d", rr.Code)
+	}
+	if txt := ephemeral(t, modeSlash(h, "mode-a", "u-alice", modeChan, "status")); !strings.Contains(txt, "not set") {
+		t.Fatalf("mode command next to enrollment: %s", txt)
+	}
+	// Key without MODE_COMMAND_TOKEN: the GET only.
+	h = newModeServer(t, newFakeMM(), a, nil).routes()
+	if rr := getMode(h, modeChan); rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), "no mode set") {
+		t.Fatalf("GET with key: %d %s", rr.Code, rr.Body.String())
+	}
+	if !gone(modeSlash(h, "mode-a", "u-alice", modeChan, "status")) {
+		t.Fatal("command without MODE_COMMAND_TOKEN")
+	}
+}
+
+func TestLoadConfigModeCommand(t *testing.T) {
+	seed := base64.RawURLEncoding.EncodeToString(testSeed())
+	load := func(extra map[string]string) (config, error) {
+		env := map[string]string{"MATTERMOST_URL": "http://mm", "MATTERMOST_TOKEN": "pat", "REGISTRATION_SECRET": "s"}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return loadConfig(func(k string) string { return env[k] })
+	}
+	_, err := load(map[string]string{"MODE_COMMAND_TOKEN": "m"})
+	if err == nil || !strings.Contains(err.Error(), "MODE_COMMAND_TOKEN needs ATTESTATION_KEY") {
+		t.Fatalf("mode without key: %v", err)
+	}
+	cfg, err := load(map[string]string{"MODE_COMMAND_TOKEN": "m1, m2", "ATTESTATION_KEY": seed})
+	if err != nil || strings.Join(cfg.modeTokens, "|") != "m1|m2" || cfg.modeStore != "/data/modes.json" ||
+		cfg.modeRateLimitPerMin != 120 || len(cfg.mm.CommandTokens) != 0 {
+		t.Fatalf("mode with key: %+v %v", cfg.modeTokens, err)
+	}
+	cfg, err = load(map[string]string{"MODE_COMMAND_TOKEN": "m", "ATTESTATION_KEY": seed, "MODE_STORE": "/x/m.json"})
+	if err != nil || cfg.modeStore != "/x/m.json" {
+		t.Fatalf("mode store: %v", err)
+	}
+	if cfg, err := load(nil); err != nil || len(cfg.modeTokens) != 0 {
+		t.Fatalf("no mode command: %v", err)
 	}
 }

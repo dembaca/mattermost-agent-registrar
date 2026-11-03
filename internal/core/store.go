@@ -114,7 +114,13 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".enrollments-*")
+	return writeFileAtomic(s.path, ".enrollments-*", data)
+}
+
+// writeFileAtomic replaces path with data: a temp file (mode 0600, pattern in
+// the same directory) is written, synced and renamed over path.
+func writeFileAtomic(path, pattern string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), pattern)
 	if err != nil {
 		return err
 	}
@@ -132,7 +138,7 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), s.path)
+	return os.Rename(tmp.Name(), path)
 }
 
 func randomString(n int) (string, error) {

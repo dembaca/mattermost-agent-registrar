@@ -18,7 +18,7 @@ import (
 )
 
 // version is the release; CHANGELOG.md and the image tag in CI follow it.
-const version = "0.4.0"
+const version = "0.5.0"
 
 // pruneEvery is how often the token store is pruned while running.
 const pruneEvery = time.Hour
@@ -27,20 +27,37 @@ type config struct {
 	listenAddr      string
 	publicChatURL   string
 	rateLimitPerMin int
-	enrollStore     string
-	pepper          string
-	mm              mattermost.Config
-	policy          core.Policy
-	attestor        *core.Attestor // nil: no attestation
+	// modeRateLimitPerMin is the own bucket of GET /register/v1/modes/…, so
+	// agents polling their channel's mode never starve registrations.
+	modeRateLimitPerMin int
+	enrollStore         string
+	pepper              string
+	modeTokens          []string // verification tokens of the mode command; none: no command
+	modeStore           string
+	mm                  mattermost.Config
+	policy              core.Policy
+	attestor            *core.Attestor // nil: no attestation, no mode records
 }
 
 type server struct {
-	cfg  config
-	svc  *core.Service
-	port core.ProviderPort
-	log  *slog.Logger
-	mu   sync.Mutex
-	hits map[string][]time.Time
+	cfg      config
+	svc      *core.Service
+	port     core.ProviderPort
+	modePort core.ProviderPort // verifies the mode command's tokens; nil without them
+	log      *slog.Logger
+	rate     *limiter
+	modeRate *limiter
+}
+
+// limiter is a per-IP sliding window of one minute.
+type limiter struct {
+	perMin int
+	mu     sync.Mutex
+	hits   map[string][]time.Time
+}
+
+func newLimiter(perMin int) *limiter {
+	return &limiter{perMin: perMin, hits: map[string][]time.Time{}}
 }
 
 func main() {
@@ -59,7 +76,8 @@ func main() {
 		os.Exit(1)
 	}
 	if cfg.attestor != nil {
-		log.Info("attestation on", "kid", cfg.attestor.Kid(), "ttl", cfg.attestor.TTL.String())
+		log.Info("attestation on", "kid", cfg.attestor.Kid(), "ttl", cfg.attestor.TTL.String(),
+			"mode_command", s.modePort != nil)
 	}
 	log.Info("listening", "version", version, "addr", cfg.listenAddr, "mattermost", cfg.mm.URL,
 		"shared_secret", cfg.policy.SharedSecret != "", "enrollment", s.svc.Store != nil)
@@ -114,11 +132,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return d
 	}
 	cfg := config{
-		listenAddr:      env("LISTEN_ADDR", ":8080"),
-		publicChatURL:   strings.TrimRight(env("PUBLIC_CHAT_URL", "https://chat.bgl.dembach.org"), "/"),
-		rateLimitPerMin: 30,
-		enrollStore:     env("ENROLLMENT_STORE", "/data/enrollments.json"),
-		pepper:          env("ENROLLMENT_PEPPER", ""),
+		listenAddr:          env("LISTEN_ADDR", ":8080"),
+		publicChatURL:       strings.TrimRight(env("PUBLIC_CHAT_URL", "https://chat.bgl.dembach.org"), "/"),
+		rateLimitPerMin:     30,
+		modeRateLimitPerMin: 120,
+		enrollStore:         env("ENROLLMENT_STORE", "/data/enrollments.json"),
+		pepper:              env("ENROLLMENT_PEPPER", ""),
+		modeTokens:          splitList(env("MODE_COMMAND_TOKEN", "")),
+		modeStore:           env("MODE_STORE", "/data/modes.json"),
 		mm: mattermost.Config{
 			URL:              strings.TrimRight(need("MATTERMOST_URL"), "/"),
 			Token:            need("MATTERMOST_TOKEN"),
@@ -154,6 +175,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if p.DefaultMaxBots < 1 || p.DefaultMaxBots > p.MaxBotsLimit {
 		errs = append(errs, errors.New("ENROLLMENT_DEFAULT_MAX_BOTS must be 1..ENROLLMENT_MAX_BOTS_LIMIT"))
+	}
+	if len(cfg.modeTokens) > 0 && env("ATTESTATION_KEY", "") == "" && env("ATTESTATION_KEY_FILE", "") == "" {
+		errs = append(errs, errors.New("MODE_COMMAND_TOKEN needs ATTESTATION_KEY or ATTESTATION_KEY_FILE: mode records are signed"))
 	}
 	enroll := len(cfg.mm.CommandTokens) > 0
 	switch {
@@ -216,7 +240,24 @@ func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, erro
 		}
 		svc.Store = st
 	}
-	return &server{cfg: cfg, svc: svc, port: port, log: log, hits: map[string][]time.Time{}}, nil
+	s := &server{cfg: cfg, svc: svc, port: port, log: log,
+		rate: newLimiter(cfg.rateLimitPerMin), modeRate: newLimiter(cfg.modeRateLimitPerMin)}
+	if cfg.attestor != nil {
+		// The store is read for GET /register/v1/modes/… even without the
+		// command, so modes set earlier stay published.
+		ms, err := core.OpenModeStore(cfg.modeStore)
+		if err != nil {
+			return nil, err
+		}
+		svc.Modes = ms
+		if len(cfg.modeTokens) > 0 {
+			// The same adapter, verifying the mode command's own tokens.
+			mcfg := cfg.mm
+			mcfg.CommandTokens = cfg.modeTokens
+			s.modePort = &mattermost.Adapter{Cfg: mcfg, Client: client, Log: log}
+		}
+	}
+	return s, nil
 }
 
 func (s *server) routes() http.Handler {
@@ -227,6 +268,12 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /register/v1/keys", s.handleKeys)
 	if s.svc.Store != nil {
 		mux.HandleFunc("POST /register/v1/command", s.handleCommand)
+	}
+	if s.svc.Modes != nil {
+		mux.HandleFunc("GET /register/v1/modes/{channel_id}", s.handleMode)
+	}
+	if s.modePort != nil {
+		mux.HandleFunc("POST /register/v1/mode", s.handleModeCommand)
 	}
 	return mux
 }
@@ -352,22 +399,72 @@ func (s *server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	s.port.ReplyPrivate(w, inv, s.svc.Command(r.Context(), inv))
 }
 
-func (s *server) allowRate(ip string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// handleModeCommand serves the mode command (/agent-mode or whatever trigger
+// the operator chose), verified with MODE_COMMAND_TOKEN. Every answer is
+// private to the caller.
+func (s *server) handleModeCommand(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if !s.allowRate(clientIP(r)) {
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
+	inv, err := s.modePort.VerifyInvocation(r)
+	if err != nil {
+		if errors.Is(err, core.ErrForbidden) {
+			s.modePort.ReplyPrivate(w, inv, strings.TrimPrefix(err.Error(), core.ErrForbidden.Error()+": "))
+			return
+		}
+		s.fail(w, err)
+		return
+	}
+	s.modePort.ReplyPrivate(w, inv, s.svc.ModeCommand(r.Context(), inv))
+}
+
+// handleMode publishes a channel's ask mode as a signed record, signed fresh
+// for each request. Public like the keys: the bus verifies the record against
+// its pinned key and never trusts this endpoint. Its own rate bucket.
+func (s *server) handleMode(w http.ResponseWriter, r *http.Request) {
+	if !s.modeRate.allow(clientIP(r)) {
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
+	rec, err := s.svc.ModeRecord(r.PathValue("channel_id"))
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	switch {
+	case errors.Is(err, core.ErrBadRequest):
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid channel id"})
+	case errors.Is(err, core.ErrNoMode):
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no mode set"})
+	case err != nil:
+		s.log.Error("sign mode record", "err", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
+	default:
+		_ = json.NewEncoder(w).Encode(map[string]string{"record": rec})
+	}
+}
+
+func (s *server) allowRate(ip string) bool { return s.rate.allow(ip) }
+
+func (l *limiter) allow(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	now := time.Now()
 	cut := now.Add(-time.Minute)
 	var kept []time.Time
-	for _, t := range s.hits[ip] {
+	for _, t := range l.hits[ip] {
 		if t.After(cut) {
 			kept = append(kept, t)
 		}
 	}
-	if len(kept) >= s.cfg.rateLimitPerMin {
-		s.hits[ip] = kept
+	if len(kept) >= l.perMin {
+		l.hits[ip] = kept
 		return false
 	}
-	s.hits[ip] = append(kept, now)
+	l.hits[ip] = append(kept, now)
 	return true
 }
 
