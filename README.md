@@ -201,7 +201,7 @@ with it is still live; until then `list` counts it as expired or revoked. The
 registrar prunes at start and then hourly. A token with live bots stays, so
 those bots stay bound and can still be removed with `revoke`.
 
-### Ask mode per channel: `/agent-mode`
+### Ask mode per channel: `/agent-ask-mode`
 
 ADR-005 of the agent bus lets a human say, per team channel, how the agents in it
 route their questions. The registrar stores that choice and publishes it as a
@@ -211,10 +211,10 @@ In a team channel (public or private) a member types:
 
 | Command | Effect |
 |---------|--------|
-| `/agent-mode` or `/agent-mode status` | the channel's mode, who set it and when, or "not set" (agents then use their default, `direct` unless configured otherwise) |
-| `/agent-mode direct` | agents ask humans directly |
-| `/agent-mode coordinator` | agents ask the coordinator first; approvals still go to a human |
-| `/agent-mode delegated` | not available yet (ADR-005 phase 3) |
+| `/agent-ask-mode` or `/agent-ask-mode status` | the channel's mode, who set it and when, or "not set" (agents then use their default, `direct` unless configured otherwise) |
+| `/agent-ask-mode direct` | agents ask humans directly |
+| `/agent-ask-mode coordinator` | agents ask the coordinator first; approvals still go to a human |
+| `/agent-ask-mode delegated` | not available yet (ADR-005 phase 3) |
 
 Anything else shows the help. Every answer is private to the caller. The channel
 is the one the command is typed in; direct and group messages are refused, and
@@ -282,12 +282,12 @@ The record names who set the mode; anyone who knows a channel id can read it.
 | `ATTESTATION_KEY` | no | Base64 or base64url (padding optional) of a 32-byte Ed25519 seed. Enables the `attestation` field and `GET /register/v1/keys`. Invalid: the registrar does not start. The `kid` is logged once at start; the key never is |
 | `ATTESTATION_KEY_FILE` | no | Path to a file holding the same value (whitespace around it is trimmed). Setting both this and `ATTESTATION_KEY` is a configuration error |
 | `ATTESTATION_TTL` | no | Default `30d`. Lifetime of an attestation (`d`, `w`, or Go durations like `12h`) |
-| `MODE_COMMAND_TOKEN` | no | Verification token of the `/agent-mode` slash command; comma-separated for one command per team. Enables `POST /register/v1/mode`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of `SLASH_COMMAND_TOKEN` and `ENROLLMENT_PEPPER` |
+| `MODE_COMMAND_TOKEN` | no | Verification token of the `/agent-ask-mode` slash command; comma-separated for one command per team. Enables `POST /register/v1/mode`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of `SLASH_COMMAND_TOKEN` and `ENROLLMENT_PEPPER` |
 | `MODE_STORE` | no | Default `/data/modes.json`. The mode per channel, its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `BOT_USERNAME_PREFIX` | no | Default `agent-` |
 | `DEFAULT_TEAM_NAME` | no | Default `ai-agents`. Team new bots join, and the team `--channels` names are looked up in; it must exist |
 | `DEFAULT_CHANNEL_NAME` | no | Default `agents`. Channel unbound bots join, and bound bots whose token names no channels; it must exist |
-| `HIDE_BOT_DM` | no | Default `true`. Hide the admin↔bot welcome DM from the registrar account's sidebar (`direct_channel_show=false`). Set `false` to keep those DMs visible. |
+| `HIDE_BOT_DM` | no | Default `true`. Hide the admin↔bot welcome DM from the registrar account's sidebar (`direct_channel_show=false`) and mark it read, at creation and again on unregister: the webapp always shows an unread DM, whatever the preference says. Set `false` to keep those DMs visible. |
 | `LISTEN_ADDR` | no | Default `:8080` |
 
 At least one way to register must be configured, or the registrar does not start.
@@ -325,12 +325,12 @@ first, and use the same names as `MM_TEAM` and `MM_CHANNEL` in the bus plugin.
    agent as its registration credential: the bus's `MM_REG_SECRET`, unchanged in
    name, sent as the same `Bearer` header.
 
-## Setup for `/agent-mode`
+## Setup for `/agent-ask-mode`
 
 1. **Configure an attestation key** (`ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`):
    the records are signed with it. Pin its public key in the bus.
 2. **Create the slash command.** *Integrations → Slash Commands → Add* in the
-   team(s) whose channels get modes: trigger word `agent-mode` (or any other),
+   team(s) whose channels get modes: trigger word `agent-ask-mode` (or any other),
    request URL `https://<registrar>/register/v1/mode`, method `POST`, autocomplete
    on with the hint `[status | direct | coordinator]`. Mattermost must reach the
    registrar (step 1 of the [enrollment setup](#setup-for-enrollment-tokens)).
@@ -340,7 +340,7 @@ first, and use the same names as `MM_TEAM` and `MM_CHANNEL` in the bus plugin.
 4. **Mount a volume for `MODE_STORE`** (the default `/data/modes.json` sits next
    to the token store).
 5. Agents fetch `GET <registrar>/register/v1/modes/{channel_id}` for their
-   channels and verify the record as described [above](#ask-mode-per-channel-agent-mode).
+   channels and verify the record as described [above](#ask-mode-per-channel-agent-ask-mode).
 
 ## Migration from the shared secret
 
@@ -427,7 +427,7 @@ docker run --rm -p 8080:8080 \
   -e REGISTRATION_SECRET=... \
   -e ATTESTATION_KEY_FILE=/run/secrets/attestation-key \
   -e MODE_COMMAND_TOKEN=... \
-  ghcr.io/dembaca/mattermost-agent-registrar:0.5.0
+  ghcr.io/dembaca/mattermost-agent-registrar:0.5.1
 ```
 
 Serve `/register/v1/` on the same host as Mattermost (for example
@@ -441,18 +441,30 @@ the token store is a local file.
 - `main.go`: configuration from the environment, HTTP handlers, rate limit.
 - `internal/core`: the provider-neutral protocol: enrollment tokens and their
   store, scope and policy, the bot description, the `/agent-token` command, the
-  owner attestation and the `/agent-mode` command with its store and record. It
+  owner attestation and the `/agent-ask-mode` command with its store and record. It
   talks to the chat system only through `core.ProviderPort` and imports no
   provider (a test checks this).
 - `internal/mattermost`: the Mattermost adapter implementing `ProviderPort`
   (REST API v4). `BindOwner` is `assign_bot`; a provider without native bot owners
   would implement it as a no-op.
 
+### Old bot DMs in the admin's sidebar
+
+Mattermost writes a welcome DM from each new bot to its creator, the registrar's
+admin user, and the webapp always shows an unread DM whatever `direct_channel_show`
+says. Versions before 0.5.1 only hid them, so they piled up with 1 unread each.
+
+To clean up, run `scripts/mark-bot-dms-read.sh` with the admin's token in the
+environment (`MM_URL`, `MM_TOKEN`, optional `BOT_USERNAME_PREFIX`, default `agent-`).
+Run it without arguments first (dry run: lists the DMs and their unread counts), then
+with `--apply`. It marks them read and hides them, and deletes nothing. Deleting bots
+makes it worse: the DM stays unread and shows without a name.
+
 ## Image
 
 ```bash
-docker build -t ghcr.io/dembaca/mattermost-agent-registrar:0.5.0 .
-docker push ghcr.io/dembaca/mattermost-agent-registrar:0.5.0
+docker build -t ghcr.io/dembaca/mattermost-agent-registrar:0.5.1 .
+docker push ghcr.io/dembaca/mattermost-agent-registrar:0.5.1
 ```
 
 CI (`.github/workflows/build.yml`) runs gofmt, `go vet` and `go test -race`, and

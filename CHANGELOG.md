@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1
+
+- **The admin↔bot welcome DM is marked read**, at creation and again on
+  unregister (`HIDE_BOT_DM`). The webapp always shows an unread DM, whatever
+  `direct_channel_show` says, so the hidden DMs piled up in the admin's sidebar
+  with 1 unread each. Unregister also cleans up bots registered by older versions.
+- `scripts/mark-bot-dms-read.sh`: one-time cleanup of the existing pile (dry run
+  by default, `--apply` marks read and hides; deletes nothing).
+- README uses `/agent-ask-mode`, the agent bus' renamed slash command.
+
 ## 0.5.0
 
 - **`/agent-mode`: the ask mode per channel, signed** (ADR-005 phase 2 of the

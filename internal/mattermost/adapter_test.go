@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -48,6 +50,84 @@ func TestHideBotDirectChannelIgnoresPreferenceFailure(t *testing.T) {
 	m.HideBotDirectChannel(context.Background(), "bot-id")
 	if prefsCalls.Load() != 1 {
 		t.Fatalf("prefs calls: got %d want 1", prefsCalls.Load())
+	}
+}
+
+// dmMux serves the routes HideBotDirectChannel uses and records the calls in order.
+func dmMux(t *testing.T, calls *[]string, directFails bool) *http.ServeMux {
+	t.Helper()
+	var mu sync.Mutex
+	rec := func(s string) {
+		mu.Lock()
+		defer mu.Unlock()
+		*calls = append(*calls, s)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v4/users/me", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(User{ID: "admin-id", Username: "admin"})
+	})
+	mux.HandleFunc("PUT /api/v4/users/me/preferences", func(w http.ResponseWriter, _ *http.Request) {
+		rec("prefs")
+	})
+	mux.HandleFunc("POST /api/v4/channels/direct", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		rec("direct " + string(body))
+		if directFails {
+			http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"dm-id","type":"D"}`))
+	})
+	mux.HandleFunc("POST /api/v4/channels/members/me/view", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		rec("view " + string(body))
+		_, _ = w.Write([]byte(`{"status":"OK"}`))
+	})
+	mux.HandleFunc("POST /api/v4/bots/{id}/disable", func(w http.ResponseWriter, _ *http.Request) {
+		rec("disable")
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("GET /api/v4/users/{id}/tokens", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
+	})
+	return mux
+}
+
+func TestHideBotDirectChannelMarksDMRead(t *testing.T) {
+	var calls []string
+	m := adapter(t, dmMux(t, &calls, false))
+	m.HideBotDirectChannel(context.Background(), "bot-id")
+	want := []string{"prefs", `direct ["admin-id","bot-id"]`, `view {"channel_id":"dm-id"}`}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls: got %q want %q", calls, want)
+	}
+}
+
+func TestHideBotDirectChannelDirectFailure(t *testing.T) {
+	var calls []string
+	m := adapter(t, dmMux(t, &calls, true))
+	m.HideBotDirectChannel(context.Background(), "bot-id")
+	want := []string{"prefs", `direct ["admin-id","bot-id"]`}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls: got %q want %q", calls, want)
+	}
+}
+
+func TestRevokeAgentMarksDMRead(t *testing.T) {
+	for _, hide := range []bool{true, false} {
+		var calls []string
+		m := adapter(t, dmMux(t, &calls, false))
+		m.Cfg.HideBotDM = hide
+		if err := m.RevokeAgent(context.Background(), core.Agent{ID: "bot-id"}); err != nil {
+			t.Fatalf("revoke: %v", err)
+		}
+		want := []string{"disable"}
+		if hide {
+			want = []string{"prefs", `direct ["admin-id","bot-id"]`, `view {"channel_id":"dm-id"}`, "disable"}
+		}
+		if !reflect.DeepEqual(calls, want) {
+			t.Errorf("HideBotDM=%v: calls %q want %q", hide, calls, want)
+		}
 	}
 }
 
