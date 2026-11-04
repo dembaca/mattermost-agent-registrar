@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2
+
+- `GET /register/v1/version`: public, rate-limited like the keys, returns
+  `{"version":"…"}` so operators and agents can tell which registrar is deployed.
+  `/healthz` is unchanged.
+
 ## 0.5.1
 
 - **The admin↔bot welcome DM is marked read**, at creation and again on
