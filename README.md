@@ -260,6 +260,11 @@ The record names who set the mode; anyone who knows a channel id can read it.
 
 `GET /healthz` → `ok`
 
+### Version
+
+`GET /register/v1/version` (public, no auth, same rate limit as the keys) returns
+the deployed registrar version as `{"version":"0.5.2"}`. `/healthz` stays `ok`.
+
 ## Environment
 
 | Variable | Required | Description |

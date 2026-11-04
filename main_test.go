@@ -464,6 +464,17 @@ func TestKeysEndpointShape(t *testing.T) {
 	}
 }
 
+func TestVersionEndpoint(t *testing.T) {
+	h := newAttestingServer(t, newFakeMM(), false, nil).routes()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/register/v1/version", nil))
+	want := `{"version":"` + version + `"}`
+	if rr.Code != http.StatusOK || strings.TrimSpace(rr.Body.String()) != want ||
+		rr.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("version: %d %s %v", rr.Code, rr.Body.String(), rr.Header())
+	}
+}
+
 func TestLoadConfigAttestation(t *testing.T) {
 	seed := base64.RawURLEncoding.EncodeToString(testSeed())
 	file := filepath.Join(t.TempDir(), "key")

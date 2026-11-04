@@ -18,7 +18,7 @@ import (
 )
 
 // version is the release; CHANGELOG.md and the image tag in CI follow it.
-const version = "0.5.1"
+const version = "0.5.2"
 
 // pruneEvery is how often the token store is pruned while running.
 const pruneEvery = time.Hour
@@ -266,6 +266,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /register/v1/agents", s.handleRegister)
 	mux.HandleFunc("DELETE /register/v1/agents/{name}", s.handleUnregister)
 	mux.HandleFunc("GET /register/v1/keys", s.handleKeys)
+	mux.HandleFunc("GET /register/v1/version", s.handleVersion)
 	if s.svc.Store != nil {
 		mux.HandleFunc("POST /register/v1/command", s.handleCommand)
 	}
@@ -365,6 +366,19 @@ func (s *server) handleKeys(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(struct {
 		Keys []core.JWK `json:"keys"`
 	}{keys})
+}
+
+// handleVersion tells which registrar version is deployed. Public, same rate
+// limit as the keys.
+func (s *server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRate(clientIP(r)) {
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(struct {
+		Version string `json:"version"`
+	}{version})
 }
 
 func (s *server) handleUnregister(w http.ResponseWriter, r *http.Request) {
