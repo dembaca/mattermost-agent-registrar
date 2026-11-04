@@ -18,7 +18,7 @@ import (
 )
 
 // version is the release; CHANGELOG.md and the image tag in CI follow it.
-const version = "0.5.0"
+const version = "0.5.1"
 
 // pruneEvery is how often the token store is pruned while running.
 const pruneEvery = time.Hour

@@ -328,6 +328,10 @@ func (m *Adapter) JoinChannels(ctx context.Context, a core.Agent, channels []str
 
 // RevokeAgent revokes the bot's access tokens and disables it.
 func (m *Adapter) RevokeAgent(ctx context.Context, a core.Agent) error {
+	if m.Cfg.HideBotDM {
+		// Cleans up bots registered by older versions, whose DMs are unread. Best effort.
+		m.HideBotDirectChannel(ctx, a.ID)
+	}
 	var tokens []AccessToken
 	if err := m.do(ctx, http.MethodGet, "/api/v4/users/"+url.PathEscape(a.ID)+"/tokens?per_page=200", nil, m.Cfg.Token, &tokens); err == nil {
 		for _, t := range tokens {
@@ -345,6 +349,10 @@ func (m *Adapter) RevokeAgent(ctx context.Context, a core.Agent) error {
 // createBot returns) therefore runs after that write — no delay is required. If a
 // future Mattermost version posts the welcome async and the sidebar entry reappears,
 // re-set the preference after the DM channel exists or after a short settle delay.
+//
+// The preference alone is not enough: the webapp (mattermost-redux channel_categories,
+// makeFilterManuallyClosedDMs and makeFilterAutoclosedDMs) always shows an UNREAD DM and
+// honours direct_channel_show only for read ones. So the DM is also marked read.
 func (m *Adapter) HideBotDirectChannel(ctx context.Context, botUserID string) {
 	var me User
 	if err := m.do(ctx, http.MethodGet, "/api/v4/users/me", nil, m.Cfg.Token, &me); err != nil || me.ID == "" {
@@ -354,6 +362,14 @@ func (m *Adapter) HideBotDirectChannel(ctx context.Context, botUserID string) {
 	prefs := []Preference{{UserID: me.ID, Category: "direct_channel_show", Name: botUserID, Value: "false"}}
 	if err := m.do(ctx, http.MethodPut, "/api/v4/users/me/preferences", prefs, m.Cfg.Token, nil); err != nil {
 		m.Log.Warn("hide bot dm", "err", err, "bot_user_id", botUserID, "admin_user_id", me.ID)
+	}
+	var dm channel
+	if err := m.do(ctx, http.MethodPost, "/api/v4/channels/direct", []string{me.ID, botUserID}, m.Cfg.Token, &dm); err != nil || dm.ID == "" {
+		m.Log.Warn("hide bot dm: open dm", "err", err, "bot_user_id", botUserID, "admin_user_id", me.ID)
+		return
+	}
+	if err := m.do(ctx, http.MethodPost, "/api/v4/channels/members/me/view", map[string]string{"channel_id": dm.ID}, m.Cfg.Token, nil); err != nil {
+		m.Log.Warn("hide bot dm: mark read", "err", err, "bot_user_id", botUserID, "channel_id", dm.ID)
 	}
 }
 
