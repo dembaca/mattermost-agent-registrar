@@ -5,7 +5,22 @@
 - **The rate limiter forgets quiet addresses.** It kept every client address it
   had ever seen, so memory grew with the number of distinct addresses (an IPv6
   /64 holder has 2^64 of them). Keys without a request in the last minute are
-  now dropped, checked at most once a minute. No change to the limits.
+  now dropped, checked at most once a minute; the table is rebuilt then, so the
+  memory of a flood of distinct addresses is given back. No change to the limits.
+
+## 0.7.1
+
+- **Rate buckets count the client behind a proxy correctly.** `clientIP` took the
+  first `X-Forwarded-For` entry, which the client sets itself (the gateway only
+  appends), so a forged header gave every request a fresh bucket and bypassed
+  the limits of registration, modes, mandates and attestations. New env
+  `TRUSTED_PROXY_HOPS` (default `0`): the entry that many places from the right
+  counts; without the header or with too few entries the peer address counts;
+  `0` ignores the header. Peer addresses in IPv6 form are read correctly too.
+- **Upgrade:** the default `0` trusts no header. Behind a proxy, set
+  `TRUSTED_PROXY_HOPS` to its number of hops (`1` for one proxy); left at `0`, all
+  clients share the bucket of the proxy's address and get `429` together.
+- No change to the API, the keys, the modes or the mandates.
 
 ## 0.7.0
 

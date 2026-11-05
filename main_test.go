@@ -760,6 +760,63 @@ func TestLoadConfigModeCommand(t *testing.T) {
 	}
 }
 
+func TestClientIPCountsTrustedHopsFromTheRight(t *testing.T) {
+	cases := []struct {
+		name string
+		hops int
+		xff  []string
+		want string
+	}{
+		{"forged first entry, one hop", 1, []string{"6.6.6.6, 203.0.113.9"}, "203.0.113.9"},
+		{"one hop, single entry", 1, []string{"203.0.113.9"}, "203.0.113.9"},
+		{"two hops", 2, []string{"6.6.6.6, 203.0.113.9, 10.0.0.2"}, "203.0.113.9"},
+		{"too few entries", 2, []string{"203.0.113.9"}, "192.0.2.1"},
+		{"no header", 1, nil, "192.0.2.1"},
+		{"zero hops ignores the header", 0, []string{"203.0.113.9"}, "192.0.2.1"},
+		{"trailing empty entry", 1, []string{"203.0.113.9,"}, "192.0.2.1"},
+		{"whitespace-only entry", 1, []string{"203.0.113.9, "}, "192.0.2.1"},
+		{"entry that is not an IP", 1, []string{"203.0.113.9, evil"}, "192.0.2.1"},
+		{"entry with a port", 1, []string{"203.0.113.9:80"}, "192.0.2.1"},
+		{"repeated lines, too few entries", 3, []string{"6.6.6.6", "203.0.113.9"}, "192.0.2.1"},
+		{"repeated header lines are joined", 1, []string{"6.6.6.6", "203.0.113.9"}, "203.0.113.9"},
+	}
+	for _, c := range cases {
+		s := &server{cfg: config{trustedProxyHops: c.hops}}
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = "192.0.2.1:4711"
+		for _, h := range c.xff {
+			r.Header.Add("X-Forwarded-For", h)
+		}
+		if got := s.clientIP(r); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+	s := &server{}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "[2001:db8::1]:4711"
+	if got := s.clientIP(r); got != "2001:db8::1" {
+		t.Errorf("ipv6 peer: got %q", got)
+	}
+}
+
+func TestLoadConfigTrustedProxyHops(t *testing.T) {
+	load := func(v string) (config, error) {
+		env := map[string]string{"MATTERMOST_URL": "http://mm", "MATTERMOST_TOKEN": "pat", "REGISTRATION_SECRET": "s", "TRUSTED_PROXY_HOPS": v}
+		return loadConfig(func(k string) string { return env[k] })
+	}
+	for v, want := range map[string]int{"": 0, "0": 0, "1": 1, "2": 2} {
+		if cfg, err := load(v); err != nil || cfg.trustedProxyHops != want {
+			t.Errorf("%q: got %d, %v", v, cfg.trustedProxyHops, err)
+		}
+	}
+	if _, err := load("-1"); err == nil {
+		t.Error("negative must fail")
+	}
+	if _, err := load("x"); err == nil {
+		t.Error("not a number must fail")
+	}
+}
+
 func TestLimiterForgetsQuietKeys(t *testing.T) {
 	l := newLimiter(2)
 	old := time.Now().Add(-2 * time.Minute)
@@ -779,5 +836,22 @@ func TestLimiterForgetsQuietKeys(t *testing.T) {
 	l.allow("203.0.113.9")
 	if l.allow("203.0.113.9") {
 		t.Error("third hit within the minute must be refused")
+	}
+}
+
+func TestLimiterSweepsAtMostOncePerMinute(t *testing.T) {
+	l := newLimiter(2)
+	l.swept = time.Now()
+	l.hits["198.51.100.1"] = []time.Time{time.Now().Add(-2 * time.Minute)}
+	l.allow("203.0.113.9")
+	if _, ok := l.hits["198.51.100.1"]; !ok {
+		t.Error("a quiet key stays until the next sweep")
+	}
+	// a key that is quiet and calls again gets exactly one hit
+	l.swept = time.Now().Add(-2 * time.Minute)
+	l.hits["198.51.100.2"] = []time.Time{time.Now().Add(-2 * time.Minute)}
+	l.allow("198.51.100.2")
+	if n := len(l.hits["198.51.100.2"]); n != 1 {
+		t.Errorf("hits after a sweep of the caller's own key: %d", n)
 	}
 }
