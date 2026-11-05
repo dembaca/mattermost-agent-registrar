@@ -87,7 +87,7 @@ func TestMandateCommandAndRecordOverHTTP(t *testing.T) {
 	if txt := ephemeral(t, mandateSlash(h, "mand-a", "u2", modeChan, "👑 of ~home")); !strings.Contains(txt, "Only members") {
 		t.Fatalf("non-member: %s", txt)
 	}
-	if txt := ephemeral(t, mandateSlash(h, "mand-a", "u-alice", modeChan, "👑 of ~nowhere")); txt != "Channel ~nowhere does not exist." {
+	if txt := ephemeral(t, mandateSlash(h, "mand-a", "u-alice", modeChan, "👑 of ~nowhere")); !strings.Contains(txt, "~nowhere is not a channel you are a member of (or it does not exist)") {
 		t.Fatalf("unknown home: %s", txt)
 	}
 	if txt := ephemeral(t, mandateSlash(h, "mand-a", "u-alice", modeChan, "please")); !strings.Contains(txt, "/agent-mandate off") {

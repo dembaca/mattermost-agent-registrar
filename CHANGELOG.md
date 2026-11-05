@@ -18,6 +18,9 @@
 - The mode command and its record are unchanged.
 - The home named in `/agent-mandate` must be a channel the human is a member of: the
   home's id goes into the public record, so a private channel's id is not handed out.
+- An unknown home and a channel the human is not in are answered alike, so a
+  stranger cannot tell whether a private channel of that name exists; the usage
+  text says the mandate and its note are public.
 
 ## 0.5.2
 

@@ -313,7 +313,9 @@ func (s *Service) MandateCommand(ctx context.Context, inv Invocation) string {
 	homeID, err := s.Provider.ChannelIDByName(ctx, inv.TeamID, req.home)
 	switch {
 	case errors.Is(err, ErrNoSuchChannel):
-		return "Channel ~" + req.home + " does not exist."
+		// The same answer as for a channel the human is not in: a stranger must
+		// not learn that a private channel of this name exists.
+		return notMemberOfHome(req.home)
 	case err != nil || !ValidChannelID(homeID):
 		s.Log.Error("resolve mandate home", "err", err, "home", req.home, "team_id", inv.TeamID)
 		return "Resolving ~" + req.home + " failed; try again."
@@ -324,7 +326,7 @@ func (s *Service) MandateCommand(ctx context.Context, inv Invocation) string {
 		s.Log.Error("home membership check", "err", err, "home", req.home, "channel_id", homeID)
 		return "Checking ~" + req.home + " failed; try again."
 	} else if !in {
-		return "You are not a member of ~" + req.home + "; a mandate can only name a channel you are in."
+		return notMemberOfHome(req.home)
 	}
 	m := ChannelMandate{ChannelID: inv.ChannelID, CrownOf: homeID, Home: req.home, SetBy: inv.Human.Handle,
 		SetByID: inv.Human.ID, SetAt: s.now(), Until: req.until, Note: req.note}
@@ -345,6 +347,10 @@ func (s *Service) MandateCommand(ctx context.Context, inv Invocation) string {
 	return out + ". Agents here pick it up the next time they fetch it."
 }
 
+func notMemberOfHome(home string) string {
+	return "~" + home + " is not a channel you are a member of (or it does not exist); a mandate can only name a channel you are in."
+}
+
 func describeMandate(m ChannelMandate) string {
 	out := fmt.Sprintf("the 👑 of ~%s gives tasks and priorities here, set by @%s on %s", m.Home, m.SetBy, fmtModeTime(m.SetAt))
 	if m.Until != "" {
@@ -362,5 +368,6 @@ func mandateUsage(trigger string) string {
 	return "A mandate says that the holder of the 👑 of another channel gives tasks and priorities for the agents in this channel.\n\n" +
 		"- `" + trigger + " 👑 of ~<home> [until YYYY-MM-DD] [note]`: set it (`:crown:` works too; `until` at most 30 days ahead; note up to 200 characters, one line)\n" +
 		"- `" + trigger + " off`: remove the mandate of this channel\n" +
-		"- `" + trigger + "` or `" + trigger + " status`: show it"
+		"- `" + trigger + "` or `" + trigger + " status`: show it\n\n" +
+		"The mandate and its note are published in a record that anyone can read without logging in: put nothing confidential in the note."
 }

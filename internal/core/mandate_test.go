@@ -196,8 +196,8 @@ func TestMandateCommand(t *testing.T) {
 	}
 
 	// Unknown home, also in another team: nothing is stored.
-	run(hAlice, chanPriv, "👑 of ~nowhere", "Channel ~nowhere does not exist.")
-	run(hAlice, chanPriv, "👑 of ~elsewhere", "Channel ~elsewhere does not exist.")
+	run(hAlice, chanPriv, "👑 of ~nowhere", "~nowhere is not a channel you are a member of (or it does not exist)")
+	run(hAlice, chanPriv, "👑 of ~elsewhere", "~elsewhere is not a channel you are a member of (or it does not exist)")
 	if _, ok := s.Mandates.Get(chanPriv); ok {
 		t.Fatal("mandate stored for an unknown home")
 	}
@@ -212,7 +212,12 @@ func TestMandateCommand(t *testing.T) {
 
 	// The home must be one the human is a member of: a private channel's id is
 	// not published for a stranger.
-	run(hBob, chanTeam, "👑 of ~proj-home", "not a member of ~proj-home")
+	run(hBob, chanTeam, "👑 of ~proj-home", "~proj-home is not a channel you are a member of (or it does not exist)")
+	// A private channel and a missing one are answered alike, word for word.
+	if a, b := s.MandateCommand(ctx, mandateInv(hBob, chanTeam, "👑 of ~proj-home")),
+		s.MandateCommand(ctx, mandateInv(hBob, chanTeam, "👑 of ~nowhere")); strings.ReplaceAll(a, "proj-home", "x") != strings.ReplaceAll(b, "nowhere", "x") {
+		t.Fatalf("private and missing answered differently: %q vs %q", a, b)
+	}
 	if m, _ := s.Mandates.Get(chanTeam); m.SetBy != "alice" {
 		t.Fatalf("a refused naming changed the mandate: %+v", m)
 	}
