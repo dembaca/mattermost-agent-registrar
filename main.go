@@ -18,7 +18,7 @@ import (
 )
 
 // version is the release; CHANGELOG.md and the image tag in CI follow it.
-const version = "0.5.2"
+const version = "0.6.0"
 
 // pruneEvery is how often the token store is pruned while running.
 const pruneEvery = time.Hour
@@ -30,13 +30,17 @@ type config struct {
 	// modeRateLimitPerMin is the own bucket of GET /register/v1/modes/…, so
 	// agents polling their channel's mode never starve registrations.
 	modeRateLimitPerMin int
-	enrollStore         string
-	pepper              string
-	modeTokens          []string // verification tokens of the mode command; none: no command
-	modeStore           string
-	mm                  mattermost.Config
-	policy              core.Policy
-	attestor            *core.Attestor // nil: no attestation, no mode records
+	// mandateRateLimitPerMin is the own bucket of GET /register/v1/mandates/….
+	mandateRateLimitPerMin int
+	enrollStore            string
+	pepper                 string
+	modeTokens             []string // verification tokens of the mode command; none: no command
+	modeStore              string
+	mandateTokens          []string // verification tokens of the mandate command; none: no command
+	mandateStore           string
+	mm                     mattermost.Config
+	policy                 core.Policy
+	attestor               *core.Attestor // nil: no attestation, no mode records
 }
 
 type server struct {
@@ -47,6 +51,9 @@ type server struct {
 	log      *slog.Logger
 	rate     *limiter
 	modeRate *limiter
+	// mandatePort verifies the mandate command's tokens; nil without them.
+	mandatePort core.ProviderPort
+	mandateRate *limiter
 }
 
 // limiter is a per-IP sliding window of one minute.
@@ -77,7 +84,7 @@ func main() {
 	}
 	if cfg.attestor != nil {
 		log.Info("attestation on", "kid", cfg.attestor.Kid(), "ttl", cfg.attestor.TTL.String(),
-			"mode_command", s.modePort != nil)
+			"mode_command", s.modePort != nil, "mandate_command", s.mandatePort != nil)
 	}
 	log.Info("listening", "version", version, "addr", cfg.listenAddr, "mattermost", cfg.mm.URL,
 		"shared_secret", cfg.policy.SharedSecret != "", "enrollment", s.svc.Store != nil)
@@ -132,14 +139,17 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return d
 	}
 	cfg := config{
-		listenAddr:          env("LISTEN_ADDR", ":8080"),
-		publicChatURL:       strings.TrimRight(env("PUBLIC_CHAT_URL", "https://chat.bgl.dembach.org"), "/"),
-		rateLimitPerMin:     30,
-		modeRateLimitPerMin: 120,
-		enrollStore:         env("ENROLLMENT_STORE", "/data/enrollments.json"),
-		pepper:              env("ENROLLMENT_PEPPER", ""),
-		modeTokens:          splitList(env("MODE_COMMAND_TOKEN", "")),
-		modeStore:           env("MODE_STORE", "/data/modes.json"),
+		listenAddr:             env("LISTEN_ADDR", ":8080"),
+		publicChatURL:          strings.TrimRight(env("PUBLIC_CHAT_URL", "https://chat.bgl.dembach.org"), "/"),
+		rateLimitPerMin:        30,
+		modeRateLimitPerMin:    120,
+		mandateRateLimitPerMin: 120,
+		enrollStore:            env("ENROLLMENT_STORE", "/data/enrollments.json"),
+		pepper:                 env("ENROLLMENT_PEPPER", ""),
+		modeTokens:             splitList(env("MODE_COMMAND_TOKEN", "")),
+		modeStore:              env("MODE_STORE", "/data/modes.json"),
+		mandateTokens:          splitList(env("MANDATE_COMMAND_TOKEN", "")),
+		mandateStore:           env("MANDATE_STORE", "/data/mandates.json"),
 		mm: mattermost.Config{
 			URL:              strings.TrimRight(need("MATTERMOST_URL"), "/"),
 			Token:            need("MATTERMOST_TOKEN"),
@@ -178,6 +188,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if len(cfg.modeTokens) > 0 && env("ATTESTATION_KEY", "") == "" && env("ATTESTATION_KEY_FILE", "") == "" {
 		errs = append(errs, errors.New("MODE_COMMAND_TOKEN needs ATTESTATION_KEY or ATTESTATION_KEY_FILE: mode records are signed"))
+	}
+	if len(cfg.mandateTokens) > 0 && env("ATTESTATION_KEY", "") == "" && env("ATTESTATION_KEY_FILE", "") == "" {
+		errs = append(errs, errors.New("MANDATE_COMMAND_TOKEN needs ATTESTATION_KEY or ATTESTATION_KEY_FILE: mandate records are signed"))
 	}
 	enroll := len(cfg.mm.CommandTokens) > 0
 	switch {
@@ -241,7 +254,8 @@ func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, erro
 		svc.Store = st
 	}
 	s := &server{cfg: cfg, svc: svc, port: port, log: log,
-		rate: newLimiter(cfg.rateLimitPerMin), modeRate: newLimiter(cfg.modeRateLimitPerMin)}
+		rate: newLimiter(cfg.rateLimitPerMin), modeRate: newLimiter(cfg.modeRateLimitPerMin),
+		mandateRate: newLimiter(cfg.mandateRateLimitPerMin)}
 	if cfg.attestor != nil {
 		// The store is read for GET /register/v1/modes/… even without the
 		// command, so modes set earlier stay published.
@@ -255,6 +269,17 @@ func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, erro
 			mcfg := cfg.mm
 			mcfg.CommandTokens = cfg.modeTokens
 			s.modePort = &mattermost.Adapter{Cfg: mcfg, Client: client, Log: log}
+		}
+		// Likewise for GET /register/v1/mandates/….
+		mds, err := core.OpenMandateStore(cfg.mandateStore)
+		if err != nil {
+			return nil, err
+		}
+		svc.Mandates = mds
+		if len(cfg.mandateTokens) > 0 {
+			mcfg := cfg.mm
+			mcfg.CommandTokens = cfg.mandateTokens
+			s.mandatePort = &mattermost.Adapter{Cfg: mcfg, Client: client, Log: log}
 		}
 	}
 	return s, nil
@@ -275,6 +300,12 @@ func (s *server) routes() http.Handler {
 	}
 	if s.modePort != nil {
 		mux.HandleFunc("POST /register/v1/mode", s.handleModeCommand)
+	}
+	if s.svc.Mandates != nil {
+		mux.HandleFunc("GET /register/v1/mandates/{channel_id}", s.handleMandate)
+	}
+	if s.mandatePort != nil {
+		mux.HandleFunc("POST /register/v1/mandate", s.handleMandateCommand)
 	}
 	return mux
 }
@@ -454,6 +485,53 @@ func (s *server) handleMode(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no mode set"})
 	case err != nil:
 		s.log.Error("sign mode record", "err", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
+	default:
+		_ = json.NewEncoder(w).Encode(map[string]string{"record": rec})
+	}
+}
+
+// handleMandateCommand serves the mandate command (/agent-mandate or whatever
+// trigger the operator chose), verified with MANDATE_COMMAND_TOKEN. Every
+// answer is private to the caller.
+func (s *server) handleMandateCommand(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if !s.allowRate(clientIP(r)) {
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
+	inv, err := s.mandatePort.VerifyInvocation(r)
+	if err != nil {
+		if errors.Is(err, core.ErrForbidden) {
+			s.mandatePort.ReplyPrivate(w, inv, strings.TrimPrefix(err.Error(), core.ErrForbidden.Error()+": "))
+			return
+		}
+		s.fail(w, err)
+		return
+	}
+	s.mandatePort.ReplyPrivate(w, inv, s.svc.MandateCommand(r.Context(), inv))
+}
+
+// handleMandate publishes a channel's mandate as a signed record, signed fresh
+// for each request. Public like the modes; its own rate bucket.
+func (s *server) handleMandate(w http.ResponseWriter, r *http.Request) {
+	if !s.mandateRate.allow(clientIP(r)) {
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
+	rec, err := s.svc.MandateRecord(r.PathValue("channel_id"))
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	switch {
+	case errors.Is(err, core.ErrBadRequest):
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid channel id"})
+	case errors.Is(err, core.ErrNoMandate):
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no mandate set"})
+	case err != nil:
+		s.log.Error("sign mandate record", "err", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
 	default:

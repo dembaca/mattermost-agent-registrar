@@ -103,6 +103,7 @@ type fakeMM struct {
 	channelType string
 	chanTypes   map[string]string // channel id -> type, for GET /api/v4/channels/{id}
 	chanMembers map[string]bool   // "channel id/user id"
+	chanNames   map[string]string // channel name -> id in team "team-m", for the mandate command
 }
 
 func (f *fakeMM) server(t *testing.T) *httptest.Server {
@@ -176,6 +177,16 @@ func (f *fakeMM) server(t *testing.T) *httptest.Server {
 	})
 	mux.HandleFunc("GET /api/v4/teams/team-id/channels/name/{ch}", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"ch-` + r.PathValue("ch") + `","type":"` + f.channelType + `"}`))
+	})
+	mux.HandleFunc("GET /api/v4/teams/team-m/channels/name/{ch}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		id, ok := f.chanNames[r.PathValue("ch")]
+		if !ok {
+			http.NotFound(w, nil)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"` + id + `","type":"O"}`))
 	})
 	mux.HandleFunc("GET /api/v4/channels/{ch}/members/{uid}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()

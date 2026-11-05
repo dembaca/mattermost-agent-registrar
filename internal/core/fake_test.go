@@ -26,6 +26,7 @@ type fakeProvider struct {
 	joined     map[string][]string        // agent id -> channels
 	revoked    map[string]bool            // agent id
 	chanTypes  map[string]string          // channel id -> O, P, D or G; members[id] holds its members
+	names      map[string]string          // "team id/channel name" -> channel id
 	failBind   bool
 	failRevoke map[string]bool // usernames whose RevokeAgent fails
 	next       int
@@ -42,6 +43,7 @@ func newFake() *fakeProvider {
 		members: map[string]map[string]bool{"proj": {"u-alice": true},
 			chanTeam: {"u-alice": true, "u-bob": true}, chanPriv: {"u-alice": true}, chanDM: {"u-alice": true}},
 		chanTypes: map[string]string{chanTeam: "O", chanPriv: "P", chanDM: "D", chanGroup: "G"},
+		names:     map[string]string{teamID + "/proj-home": chanPriv, teamID + "/team-home": chanTeam, "other-team/elsewhere": chanTeam},
 		team:      map[string]bool{"u-alice": true, "u-bob": true},
 		agents:    map[string]Agent{},
 		creds:     map[string]string{},
@@ -113,6 +115,18 @@ func (f *fakeProvider) HumanInChannel(_ context.Context, h Human, id string) (bo
 		return false, ErrNotTeamChannel
 	}
 	return f.members[id][h.ID], nil
+}
+
+// Teams and channel names of the fake provider.
+const teamID = "team-1"
+
+func (f *fakeProvider) ChannelIDByName(_ context.Context, team, name string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if id, ok := f.names[team+"/"+name]; ok {
+		return id, nil
+	}
+	return "", ErrNoSuchChannel
 }
 
 func (f *fakeProvider) FindAgent(_ context.Context, username string) (*Agent, error) {

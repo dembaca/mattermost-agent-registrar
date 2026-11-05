@@ -24,6 +24,8 @@ var (
 	ErrNotTeamChannel = errors.New("not a team channel")
 	// ErrNoMode: no ask mode is set for the channel.
 	ErrNoMode = errors.New("no mode set")
+	// ErrNoMandate: no mandate is set for the channel.
+	ErrNoMandate = errors.New("no mandate set")
 )
 
 var (
@@ -61,6 +63,8 @@ type Service struct {
 	Log      *slog.Logger
 	Attestor *Attestor  // nil: no attestation, no mode records
 	Modes    *ModeStore // nil: no ask modes per channel
+	// Mandates: nil means no mandates per channel.
+	Mandates *MandateStore
 	Now      func() time.Time
 
 	enrollMu sync.Mutex // serialises enrollments, so MaxBots holds under concurrency

@@ -230,20 +230,29 @@ func (s *Service) ModeCommand(ctx context.Context, inv Invocation) string {
 // checkModeChannel returns why the invocation's channel cannot have a mode
 // (not a team channel, missing, caller not a member), or "".
 func (s *Service) checkModeChannel(ctx context.Context, inv Invocation) string {
+	return s.checkChannelAccess(ctx, inv, "Ask modes are set per team channel, not in direct or group messages.",
+		"Only members of this channel can see or set its ask mode.")
+}
+
+// checkChannelAccess is the check behind the channel commands: the
+// invocation's channel must be a team channel the caller is a member of.
+// noTeam and notMember are the refusals for a direct or group message and for
+// a non-member.
+func (s *Service) checkChannelAccess(ctx context.Context, inv Invocation, noTeam, notMember string) string {
 	if !ValidChannelID(inv.ChannelID) {
 		return "This command needs a channel; run it in a team channel."
 	}
 	ok, err := s.Provider.HumanInChannel(ctx, inv.Human, inv.ChannelID)
 	switch {
 	case errors.Is(err, ErrNotTeamChannel):
-		return "Ask modes are set per team channel, not in direct or group messages."
+		return noTeam
 	case errors.Is(err, ErrNoSuchChannel):
 		return "This channel was not found."
 	case err != nil:
 		s.Log.Error("channel membership check", "err", err, "channel_id", inv.ChannelID)
 		return "Checking the channel failed; try again."
 	case !ok:
-		return "Only members of this channel can see or set its ask mode."
+		return notMember
 	}
 	return ""
 }
