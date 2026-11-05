@@ -126,6 +126,41 @@ as an RFC 8037 JWK, with `Cache-Control: max-age=300`:
 Without a key it returns `{"keys":[]}` and the register response has no
 `attestation` field.
 
+**Reading a bot's attestation later (0.7.0).** The registration's attestation
+reaches only the bot's own host. For other agents, `GET
+/register/v1/attestations/{bot_id}` (public, no auth) returns the same claims as a
+record signed for this request:
+
+| Status | Body |
+|--------|------|
+| `200` | `{"record":"<jws>"}` |
+| `404` | `{"error":"no attestation"}`: none is recorded, or the bot is gone |
+| `400` | `{"error":"invalid bot id"}` |
+| `502` | `{"error":"lookup failed"}`: the chat system could not say whether the bot exists |
+
+The record has the same header (`typ` `mm-agent-attestation+jwt`) and claims as the
+registration's, with `iat` now and `exp` one hour later (the registration's lives
+`ATTESTATION_TTL`). The registrar keeps what it accepted for each bot it
+registers with an attestation key set, by either way (enrollment token or shared
+secret), in `ATTESTATION_STORE`, and signs it afresh for each read: nothing signed
+is stored. `/register/v1/agents/<name>` and the enrollment cleanup remove the
+claims with the bot. A read never deletes: it answers 404 for a bot the chat
+system does not find, and keeps the record. It asks the chat system whether the
+bot exists, and remembers a positive answer for 45 s per bot id, so reads cost it
+one lookup per bot and 45 s at most.
+
+The record shows what the registrar accepted when it registered the bot, not
+the account's state in Mattermost now: a bot disabled outside the registrar
+attests until it is unregistered. With the shared secret `responsible` is the
+caller's unchecked claim; `via: secret` marks that. Bots registered before 0.7.0 have
+no record and answer 404 until they are registered again. The route has its own
+rate bucket (120 requests per minute per IP), sends `Cache-Control: no-store`, and
+exists only with an attestation key. The rate bucket counts by client address,
+taken from `X-Forwarded-For` as the other buckets do: run the registrar only
+behind a proxy that sets that header itself, or a forged one defeats it. The claims are public to anyone who knows
+the bot id (26 characters, not guessable); they are the ones the bot's description
+already shows.
+
 The token is a compact JWS (RFC 7515, base64url without padding), signed with
 EdDSA. The header is exactly
 `{"alg":"EdDSA","typ":"mm-agent-attestation+jwt","kid":"<kid>"}`; `kid` is the
@@ -328,7 +363,7 @@ mandate; anyone who knows a channel id can read it.
 ### Version
 
 `GET /register/v1/version` (public, no auth, same rate limit as the keys) returns
-the deployed registrar version as `{"version":"0.6.0"}`. `/healthz` stays `ok`.
+the deployed registrar version as `{"version":"0.7.0"}`. `/healthz` stays `ok`.
 
 ## Environment
 
@@ -354,6 +389,7 @@ the deployed registrar version as `{"version":"0.6.0"}`. `/healthz` stays `ok`.
 | `ATTESTATION_TTL` | no | Default `30d`. Lifetime of an attestation (`d`, `w`, or Go durations like `12h`) |
 | `MODE_COMMAND_TOKEN` | no | Verification token of the `/agent-ask-mode` slash command; comma-separated for one command per team. Enables `POST /register/v1/mode`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of `SLASH_COMMAND_TOKEN` and `ENROLLMENT_PEPPER` |
 | `MANDATE_COMMAND_TOKEN` | no | Verification token of the `/agent-mandate` slash command; comma-separated for one command per team. Enables `POST /register/v1/mandate`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of the other command tokens |
+| `ATTESTATION_STORE` | no | Default `/data/attestations.json`. The claims of each bot, by bot id, behind `GET /register/v1/attestations/{bot_id}`; its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `MANDATE_STORE` | no | Default `/data/mandates.json`. The mandate per channel, its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `MODE_STORE` | no | Default `/data/modes.json`. The mode per channel, its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `BOT_USERNAME_PREFIX` | no | Default `agent-` |
@@ -527,7 +563,7 @@ the token store is a local file.
 - `main.go`: configuration from the environment, HTTP handlers, rate limit.
 - `internal/core`: the provider-neutral protocol: enrollment tokens and their
   store, scope and policy, the bot description, the `/agent-token` command, the
-  owner attestation and the `/agent-ask-mode` command with its store and record. It
+  owner attestation (with the per-bot claims it serves) and the `/agent-ask-mode` command with its store and record. It
   talks to the chat system only through `core.ProviderPort` and imports no
   provider (a test checks this).
 - `internal/mattermost`: the Mattermost adapter implementing `ProviderPort`

@@ -26,6 +26,8 @@ var (
 	ErrNoMode = errors.New("no mode set")
 	// ErrNoMandate: no mandate is set for the channel.
 	ErrNoMandate = errors.New("no mandate set")
+	// ErrNoAttestation: no attestation is recorded for the bot, or it is gone.
+	ErrNoAttestation = errors.New("no attestation")
 )
 
 var (
@@ -57,6 +59,8 @@ type Policy struct {
 // Service runs the protocol: registration (shared secret or enrollment
 // token), unregistration, the token command and the ask mode per channel.
 type Service struct {
+	existsMu sync.Mutex
+	exists   map[string]time.Time // bot id -> until when it counts as found (claims.go)
 	Provider ProviderPort
 	Store    *Store // nil: enrollment tokens are off
 	Policy   Policy
@@ -65,7 +69,10 @@ type Service struct {
 	Modes    *ModeStore // nil: no ask modes per channel
 	// Mandates: nil means no mandates per channel.
 	Mandates *MandateStore
-	Now      func() time.Time
+	// Claims: nil means no attestation endpoint; the claims of every bot
+	// registered while it is set are kept here.
+	Claims *ClaimStore
+	Now    func() time.Time
 
 	enrollMu sync.Mutex // serialises enrollments, so MaxBots holds under concurrency
 }
@@ -260,6 +267,7 @@ func (s *Service) Register(ctx context.Context, cred string, req RegisterRequest
 			s.undo(ctx, agent)
 			return Registration{}, fmt.Errorf("attest: %w", err)
 		}
+		s.remember(claims)
 		s.Log.Info("registered unbound agent", "username", username)
 		return out, nil
 	}
@@ -282,6 +290,7 @@ func (s *Service) Register(ctx context.Context, cred string, req RegisterRequest
 	if out.Attestation, err = s.attest(claims); err != nil {
 		s.Log.Error("attest", "err", err, "username", username)
 	}
+	s.remember(claims)
 	s.Log.Info("registered bound agent", "username", username, "owner", owner.Handle, "token_id", tok.ID)
 	return out, nil
 }
@@ -329,6 +338,9 @@ func (s *Service) Unregister(ctx context.Context, cred, name string) error {
 		if s.Store != nil {
 			_ = s.Store.RemoveAgent(username)
 		}
+		if s.Claims != nil {
+			_ = s.Claims.RemoveUsername(username)
+		}
 		return nil
 	}
 	ok := s.isSharedSecret(cred)
@@ -356,6 +368,7 @@ func (s *Service) disable(ctx context.Context, agent Agent) error {
 	if err := s.Provider.RevokeAgent(ctx, agent); err != nil {
 		return fmt.Errorf("%w: disable: %v", ErrUpstream, err)
 	}
+	s.forget(agent)
 	if s.Store != nil {
 		if err := s.Store.RemoveAgent(agent.Username); err != nil {
 			s.Log.Warn("forget agent", "err", err, "username", agent.Username)
@@ -376,6 +389,11 @@ func (s *Service) unregisterEnrolled(ctx context.Context, rec AgentRecord) (remo
 		if agent != nil {
 			s.Log.Warn("enrolled username now belongs to another account; forgetting the record only",
 				"username", rec.Username, "recorded_id", rec.UserID, "found_id", agent.ID)
+		}
+		if s.Claims != nil {
+			if err := s.Claims.Remove(rec.UserID); err != nil {
+				s.Log.Warn("forget claims", "err", err, "username", rec.Username)
+			}
 		}
 		return false, s.Store.RemoveAgent(rec.Username)
 	}

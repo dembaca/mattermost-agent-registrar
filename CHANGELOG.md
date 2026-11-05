@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.0
+
+- **`GET /register/v1/attestations/{bot_id}`**: a bot's attestation for other
+  agents, signed fresh for each read (public, own rate bucket of 120 per minute
+  per IP, `Cache-Control: no-store`). Same header (`mm-agent-attestation+jwt`) and
+  claims as the registration's; `iat` is now and `exp` one hour later. `404` with
+  `{"error":"no attestation"}` means none (not recorded, or the bot is gone);
+  `400` for an invalid id; `502` when the chat system cannot say whether the bot
+  exists. Why: a bot cannot write its own user props (Mattermost answers 403), so
+  the attestation never reached other agents.
+- The registrar now keeps the claims of every bot it registers (enrollment token
+  and shared secret alike) in `ATTESTATION_STORE` (default
+  `/data/attestations.json`, mode 0600, atomic), and removes them with the bot
+  (`DELETE /register/v1/agents/<name>` and the enrollment cleanup); a read never
+  deletes. It checks that the bot exists, remembering a positive answer for 45 s
+  per bot id. Bots registered before this version have no record and
+  answer 404 until they are registered again. Mount `/data` as before.
+- No change to the registration answer, the keys, the modes or the mandates.
+
 ## 0.6.0
 
 - **`/agent-mandate`**: a trusted human types `/agent-mandate set ~<home> [until YYYY-MM-DD] [note]`

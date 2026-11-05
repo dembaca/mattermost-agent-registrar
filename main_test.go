@@ -155,6 +155,16 @@ func (f *fakeMM) server(t *testing.T) *httptest.Server {
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(mattermost.Bot{UserID: id, Username: body["username"]})
 	})
+	mux.HandleFunc("POST /api/v4/bots/{bot}/disable", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		for name, u := range f.users {
+			if u.ID == r.PathValue("bot") {
+				delete(f.users, name)
+			}
+		}
+		f.mu.Unlock()
+		_, _ = w.Write([]byte(`{}`))
+	})
 	mux.HandleFunc("POST /api/v4/bots/{bot}/assign/{owner}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.assigned[r.PathValue("bot")] = r.PathValue("owner")
