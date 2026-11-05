@@ -14,7 +14,7 @@ import (
 )
 
 // Mandate per channel: a trusted human, typing the mandate command in a
-// project channel (the target home), says that the holder of the crown of
+// project channel (the target home), says that the coordinator of
 // another channel (~home) gives tasks and priorities for the agents in this
 // channel. The registrar stores that and publishes it as a signed record; the
 // bus trusts the record, never the endpoint that serves it.
@@ -35,7 +35,7 @@ const (
 // order.
 type MandateClaims struct {
 	ChannelID string `json:"channel_id"` // the channel the command was typed in
-	CrownOf   string `json:"crown_of"`   // channel id of the named home
+	Home      string `json:"home"`       // channel id of the named home, whose coordinator holds the mandate
 	SetBy     string `json:"set_by"`     // the setter's handle, lower case, without "@"
 	SetByID   string `json:"set_by_id"`  // the setter's provider user id
 	SetAtMs   int64  `json:"set_at_ms"`  // when the human set it, unix milliseconds
@@ -74,8 +74,8 @@ func VerifyMandate(token string, pub ed25519.PublicKey, now time.Time) (MandateC
 // ChannelMandate is the mandate a human set for one channel.
 type ChannelMandate struct {
 	ChannelID string    `json:"channel_id"`
-	CrownOf   string    `json:"crown_of"` // channel id of the home
-	Home      string    `json:"home"`     // its name as typed, for replies
+	HomeID    string    `json:"home_id"` // channel id of the home
+	Home      string    `json:"home"`    // its name as typed, for replies
 	SetBy     string    `json:"set_by"`
 	SetByID   string    `json:"set_by_id"`
 	SetAt     time.Time `json:"set_at"`
@@ -188,7 +188,7 @@ func (s *Service) MandateRecord(channelID string) (string, error) {
 	}
 	return s.Attestor.SignMandate(MandateClaims{
 		ChannelID: m.ChannelID,
-		CrownOf:   m.CrownOf,
+		Home:      m.HomeID,
 		SetBy:     m.SetBy,
 		SetByID:   m.SetByID,
 		SetAtMs:   m.SetAt.UnixMilli(),
@@ -228,11 +228,7 @@ func parseMandate(text string, today time.Time) (mandateRequest, string) {
 		text = strings.TrimSpace(text[i:])
 		return w
 	}
-	crown := next()
-	if crown != "👑" && !strings.EqualFold(crown, ":crown:") {
-		return mandateRequest{}, ""
-	}
-	if !strings.EqualFold(next(), "of") {
+	if !strings.EqualFold(next(), "set") {
 		return mandateRequest{}, ""
 	}
 	home := strings.ToLower(strings.TrimPrefix(next(), "~"))
@@ -304,8 +300,8 @@ func (s *Service) MandateCommand(ctx context.Context, inv Invocation) string {
 			s.Log.Error("remove mandate", "err", err, "channel_id", inv.ChannelID)
 			return "Removing the mandate failed; try again."
 		}
-		s.Log.Info("removed mandate", "by", inv.Human.Handle, "channel_id", inv.ChannelID, "crown_of", cur.CrownOf)
-		return "Mandate removed: the 👑 of ~" + cur.Home + " no longer gives tasks for this channel."
+		s.Log.Info("removed mandate", "by", inv.Human.Handle, "channel_id", inv.ChannelID, "home_id", cur.HomeID)
+		return "Mandate removed: the coordinator of ~" + cur.Home + " no longer gives tasks for this channel."
 	}
 	if inv.TeamID == "" {
 		return "This command needs a team; run it in a team channel."
@@ -328,14 +324,14 @@ func (s *Service) MandateCommand(ctx context.Context, inv Invocation) string {
 	} else if !in {
 		return notMemberOfHome(req.home)
 	}
-	m := ChannelMandate{ChannelID: inv.ChannelID, CrownOf: homeID, Home: req.home, SetBy: inv.Human.Handle,
+	m := ChannelMandate{ChannelID: inv.ChannelID, HomeID: homeID, Home: req.home, SetBy: inv.Human.Handle,
 		SetByID: inv.Human.ID, SetAt: s.now(), Until: req.until, Note: req.note}
 	if err := s.Mandates.Set(m); err != nil {
 		s.Log.Error("set mandate", "err", err, "channel_id", inv.ChannelID)
 		return "Setting the mandate failed; try again."
 	}
-	s.Log.Info("set mandate", "by", inv.Human.Handle, "channel_id", inv.ChannelID, "crown_of", homeID, "until", req.until)
-	out := "Mandate set: the 👑 of ~" + req.home + " gives tasks and priorities for the agents in this channel"
+	s.Log.Info("set mandate", "by", inv.Human.Handle, "channel_id", inv.ChannelID, "home_id", homeID, "until", req.until)
+	out := "Mandate set: the coordinator of ~" + req.home + " gives tasks and priorities for the agents in this channel"
 	if req.until != "" {
 		out += ", until " + req.until
 	} else {
@@ -352,7 +348,7 @@ func notMemberOfHome(home string) string {
 }
 
 func describeMandate(m ChannelMandate) string {
-	out := fmt.Sprintf("the 👑 of ~%s gives tasks and priorities here, set by @%s on %s", m.Home, m.SetBy, fmtModeTime(m.SetAt))
+	out := fmt.Sprintf("the coordinator of ~%s gives tasks and priorities here, set by @%s on %s", m.Home, m.SetBy, fmtModeTime(m.SetAt))
 	if m.Until != "" {
 		out += ", until " + m.Until
 	} else {
@@ -365,8 +361,8 @@ func describeMandate(m ChannelMandate) string {
 }
 
 func mandateUsage(trigger string) string {
-	return "A mandate says that the holder of the 👑 of another channel gives tasks and priorities for the agents in this channel.\n\n" +
-		"- `" + trigger + " 👑 of ~<home> [until YYYY-MM-DD] [note]`: set it (`:crown:` works too; `until` at most 30 days ahead; note up to 200 characters, one line)\n" +
+	return "A mandate says that the coordinator of another channel gives tasks and priorities for the agents in this channel.\n\n" +
+		"- `" + trigger + " set ~<home> [until YYYY-MM-DD] [note]`: set it (`until` at most 30 days ahead; note up to 200 characters, one line)\n" +
 		"- `" + trigger + " off`: remove the mandate of this channel\n" +
 		"- `" + trigger + "` or `" + trigger + " status`: show it\n\n" +
 		"The mandate and its note are published in a record that anyone can read without logging in: put nothing confidential in the note."

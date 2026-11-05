@@ -81,13 +81,13 @@ func TestMandateCommandAndRecordOverHTTP(t *testing.T) {
 	if txt := ephemeral(t, mandateSlash(h, "mand-a", "u-alice", modeChan, "")); !strings.Contains(txt, "not set") {
 		t.Fatalf("status: %s", txt)
 	}
-	if txt := ephemeral(t, mandateSlash(h, "mand-b", "u-alice", modeDM, "👑 of ~home")); !strings.Contains(txt, "direct or group") {
+	if txt := ephemeral(t, mandateSlash(h, "mand-b", "u-alice", modeDM, "set ~home")); !strings.Contains(txt, "direct or group") {
 		t.Fatalf("DM: %s", txt)
 	}
-	if txt := ephemeral(t, mandateSlash(h, "mand-a", "u2", modeChan, "👑 of ~home")); !strings.Contains(txt, "Only members") {
+	if txt := ephemeral(t, mandateSlash(h, "mand-a", "u2", modeChan, "set ~home")); !strings.Contains(txt, "Only members") {
 		t.Fatalf("non-member: %s", txt)
 	}
-	if txt := ephemeral(t, mandateSlash(h, "mand-a", "u-alice", modeChan, "👑 of ~nowhere")); !strings.Contains(txt, "~nowhere is not a channel you are a member of (or it does not exist)") {
+	if txt := ephemeral(t, mandateSlash(h, "mand-a", "u-alice", modeChan, "set ~nowhere")); !strings.Contains(txt, "~nowhere is not a channel you are a member of (or it does not exist)") {
 		t.Fatalf("unknown home: %s", txt)
 	}
 	if txt := ephemeral(t, mandateSlash(h, "mand-a", "u-alice", modeChan, "please")); !strings.Contains(txt, "/agent-mandate off") {
@@ -99,7 +99,7 @@ func TestMandateCommandAndRecordOverHTTP(t *testing.T) {
 
 	until := time.Now().UTC().AddDate(0, 0, 3).Format("2006-01-02")
 	before := time.Now()
-	if txt := ephemeral(t, mandateSlash(h, "mand-b", "u-alice", modeChan, ":crown: Of ~home UNTIL "+until+" follow the plan")); !strings.Contains(txt, "Mandate set") {
+	if txt := ephemeral(t, mandateSlash(h, "mand-b", "u-alice", modeChan, "Set ~home UNTIL "+until+" follow the plan")); !strings.Contains(txt, "Mandate set") {
 		t.Fatalf("set: %s", txt)
 	}
 	rr := getMandate(h, modeChan)
@@ -114,7 +114,7 @@ func TestMandateCommandAndRecordOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ChannelID != modeChan || c.CrownOf != mandateHome || c.SetBy != "dembaca" || c.SetByID != "u-alice" ||
+	if c.ChannelID != modeChan || c.Home != mandateHome || c.SetBy != "dembaca" || c.SetByID != "u-alice" ||
 		c.Until != until || c.Note != "follow the plan" ||
 		c.SetAtMs < before.UnixMilli() || c.SetAtMs > time.Now().UnixMilli() || c.Exp-c.Iat != 3600 {
 		t.Fatalf("claims: %+v", c)

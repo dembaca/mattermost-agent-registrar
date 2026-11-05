@@ -259,17 +259,17 @@ The record names who set the mode; anyone who knows a channel id can read it.
 ### Mandate per channel: `/agent-mandate`
 
 A trusted human, typing the command in a project channel (the *target home*),
-says: the holder of the 👑 of `~<home>` gives tasks and priorities for the agents
+says: the coordinator of `~<home>` gives tasks and priorities for the agents
 in this channel. The registrar stores that and publishes it as a signed record;
 the bus reads it from there.
 
 | Command | Effect |
 |---------|--------|
-| `/agent-mandate 👑 of ~<home> [until YYYY-MM-DD] [note]` | set the mandate of this channel; a new command replaces the old one |
+| `/agent-mandate set ~<home> [until YYYY-MM-DD] [note]` | set the mandate of this channel; a new command replaces the old one |
 | `/agent-mandate off` | remove the mandate of this channel |
 | `/agent-mandate` or `/agent-mandate status` | show it: home, who set it and when, until, note |
 
-`:crown:` works for 👑, `of` and `until` in any case, the `~` is optional.
+`set` and `until` in any case, the `~` is optional.
 `~<home>` is a channel **name**, resolved to its id in the team the command was
 typed in. Only a channel the human is a member of can be named: an unknown
 name and a channel the human is not in get the same answer (`~x is not a channel
@@ -309,7 +309,7 @@ with these claims, in this order:
 | Claim | Meaning |
 |-------|---------|
 | `channel_id` | the channel the command was typed in |
-| `crown_of` | channel id of the named home |
+| `home` | channel id of the named home, whose coordinator holds the mandate |
 | `set_by` | the setter's username, lower case, without `@` |
 | `set_by_id` | the setter's Mattermost user id |
 | `set_at_ms` | when the human set it, unix **milliseconds** |
@@ -420,7 +420,7 @@ first, and use the same names as `MM_TEAM` and `MM_CHANNEL` in the bus plugin.
 2. **Create the slash command.** *Integrations → Slash Commands → Add* in the
    team(s) whose channels get mandates: trigger word `agent-mandate`, request URL
    `https://<registrar>/register/v1/mandate`, method `POST`, autocomplete on with
-   the hint `👑 of ~<home> [until YYYY-MM-DD] [note] | off | status`.
+   the hint `set ~<home> [until YYYY-MM-DD] [note] | off | status`.
 3. **Copy the command's token into `MANDATE_COMMAND_TOKEN`** (comma-separate the
    tokens of several teams). Its own token: no other command's token verifies it.
 4. **Mount a volume for `MANDATE_STORE`** (the default `/data/mandates.json`).

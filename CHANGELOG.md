@@ -2,15 +2,15 @@
 
 ## 0.6.0
 
-- **`/agent-mandate`**: a trusted human types `/agent-mandate 👑 of ~<home> [until YYYY-MM-DD] [note]`
-  in a project channel; the holder of the crown of `~<home>` then gives tasks and
+- **`/agent-mandate`**: a trusted human types `/agent-mandate set ~<home> [until YYYY-MM-DD] [note]`
+  in a project channel; the coordinator of `~<home>` then gives tasks and
   priorities for the agents in that channel. `off` removes it, no argument or
   `status` shows it. `~<home>` is a channel name resolved in the team of the
   invocation (new `ProviderPort.ChannelIDByName`, `Invocation.TeamID`); `until` is
   today to 30 days ahead; the note is one line, 200 characters at most.
 - **`GET /register/v1/mandates/{channel_id}`** (public, own rate bucket of 120 per
   minute per IP) returns the mandate as a signed record, header typ
-  `mm-agent-mandate+jwt`, claims `channel_id`, `crown_of`, `set_by`, `set_by_id`,
+  `mm-agent-mandate+jwt`, claims `channel_id`, `home`, `set_by`, `set_by_id`,
   `set_at_ms`, `until`, `note`, `iat`, `exp` (1 h, signed fresh per read).
 - New env: `MANDATE_COMMAND_TOKEN` (needs the attestation key), `MANDATE_STORE`
   (default `/data/mandates.json`). `/healthz`-style startup log reports
