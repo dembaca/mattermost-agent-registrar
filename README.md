@@ -363,7 +363,7 @@ mandate; anyone who knows a channel id can read it.
 ### Version
 
 `GET /register/v1/version` (public, no auth, same rate limit as the keys) returns
-the deployed registrar version as `{"version":"0.7.0"}`. `/healthz` stays `ok`.
+the deployed registrar version as `{"version":"0.7.1"}`. `/healthz` stays `ok`.
 
 ## Environment
 
@@ -397,6 +397,7 @@ the deployed registrar version as `{"version":"0.7.0"}`. `/healthz` stays `ok`.
 | `DEFAULT_CHANNEL_NAME` | no | Default `agents`. Channel unbound bots join, and bound bots whose token names no channels; it must exist |
 | `HIDE_BOT_DM` | no | Default `true`. Hide the admin↔bot welcome DM from the registrar account's sidebar (`direct_channel_show=false`) and mark it read, at creation and again on unregister: the webapp always shows an unread DM, whatever the preference says. Set `false` to keep those DMs visible. |
 | `LISTEN_ADDR` | no | Default `:8080` |
+| `TRUSTED_PROXY_HOPS` | no | Default `1`. How many proxies in front of the registrar append to `X-Forwarded-For`. The rate buckets count the entry that many places from the right; `0` ignores the header. See [Behind a proxy](#behind-a-proxy) |
 
 At least one way to register must be configured, or the registrar does not start.
 The registrar creates no teams or channels. Create the team and the default channel
@@ -478,6 +479,17 @@ has no owner split. To keep owner-bound bots:
    keep working until they re-register.
 3. When no agent uses the shared secret any more, set `ALLOW_SHARED_SECRET=false`
    (or remove `REGISTRATION_SECRET`) and rotate the old secret.
+
+## Behind a proxy
+
+The rate buckets (registration, modes, mandates, attestations) count clients by
+IP. A proxy appends the address it saw to `X-Forwarded-For` and keeps what the
+client already put there, so the first entry is the client's claim, not a fact.
+The registrar therefore takes the entry `TRUSTED_PROXY_HOPS` places from the
+right: `1` for one proxy (the default, e.g. the Cilium gateway), `2` for two in a
+row. Without the header, or with fewer entries than hops, the connection's own
+address counts; with `0` the header is ignored. Set it to the real number of
+proxies: too high lets a client pick its bucket, too low counts the proxy.
 
 ## Threat model
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.1
+
+- **Rate buckets count the client behind a proxy correctly.** `clientIP` took the
+  first `X-Forwarded-For` entry, which the client sets itself (the gateway only
+  appends), so a forged header gave every request a fresh bucket and bypassed
+  the limits of registration, modes, mandates and attestations. New env
+  `TRUSTED_PROXY_HOPS` (default `1`): the entry that many places from the right
+  counts; without the header or with too few entries the peer address counts;
+  `0` ignores the header. Peer addresses in IPv6 form are read correctly too.
+- No change to the API, the keys, the modes or the mandates.
+
 ## 0.7.0
 
 - **`GET /register/v1/attestations/{bot_id}`**: a bot's attestation for other

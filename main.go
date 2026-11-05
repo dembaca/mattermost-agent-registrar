@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -18,7 +19,7 @@ import (
 )
 
 // version is the release; CHANGELOG.md and the image tag in CI follow it.
-const version = "0.7.0"
+const version = "0.7.1"
 
 // pruneEvery is how often the token store is pruned while running.
 const pruneEvery = time.Hour
@@ -34,16 +35,20 @@ type config struct {
 	mandateRateLimitPerMin int
 	// attestationRateLimitPerMin is the own bucket of GET /register/v1/attestations/….
 	attestationRateLimitPerMin int
-	attestationStore           string
-	enrollStore                string
-	pepper                     string
-	modeTokens                 []string // verification tokens of the mode command; none: no command
-	modeStore                  string
-	mandateTokens              []string // verification tokens of the mandate command; none: no command
-	mandateStore               string
-	mm                         mattermost.Config
-	policy                     core.Policy
-	attestor                   *core.Attestor // nil: no attestation, no mode records
+	// trustedProxyHops is how many proxies in front of the registrar append to
+	// X-Forwarded-For; the entry that many places from the right is the client.
+	// 0: the header is ignored.
+	trustedProxyHops int
+	attestationStore string
+	enrollStore      string
+	pepper           string
+	modeTokens       []string // verification tokens of the mode command; none: no command
+	modeStore        string
+	mandateTokens    []string // verification tokens of the mandate command; none: no command
+	mandateStore     string
+	mm               mattermost.Config
+	policy           core.Policy
+	attestor         *core.Attestor // nil: no attestation, no mode records
 }
 
 type server struct {
@@ -149,6 +154,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		modeRateLimitPerMin:        120,
 		mandateRateLimitPerMin:     120,
 		attestationRateLimitPerMin: 120,
+		trustedProxyHops:           num("TRUSTED_PROXY_HOPS", 1),
 		attestationStore:           env("ATTESTATION_STORE", "/data/attestations.json"),
 		enrollStore:                env("ENROLLMENT_STORE", "/data/enrollments.json"),
 		pepper:                     env("ENROLLMENT_PEPPER", ""),
@@ -371,7 +377,7 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if !s.allowRate(clientIP(r)) {
+	if !s.allowRate(s.clientIP(r)) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
@@ -400,7 +406,7 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 // handleKeys publishes the attestation public key (RFC 8037 JWK set). Public;
 // empty without a key.
 func (s *server) handleKeys(w http.ResponseWriter, r *http.Request) {
-	if !s.allowRate(clientIP(r)) {
+	if !s.allowRate(s.clientIP(r)) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
@@ -418,7 +424,7 @@ func (s *server) handleKeys(w http.ResponseWriter, r *http.Request) {
 // handleVersion tells which registrar version is deployed. Public, same rate
 // limit as the keys.
 func (s *server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	if !s.allowRate(clientIP(r)) {
+	if !s.allowRate(s.clientIP(r)) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
@@ -429,7 +435,7 @@ func (s *server) handleVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleUnregister(w http.ResponseWriter, r *http.Request) {
-	if !s.allowRate(clientIP(r)) {
+	if !s.allowRate(s.clientIP(r)) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
@@ -444,7 +450,7 @@ func (s *server) handleUnregister(w http.ResponseWriter, r *http.Request) {
 // the operator chose). Every answer is private to the caller.
 func (s *server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-	if !s.allowRate(clientIP(r)) {
+	if !s.allowRate(s.clientIP(r)) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
@@ -465,7 +471,7 @@ func (s *server) handleCommand(w http.ResponseWriter, r *http.Request) {
 // private to the caller.
 func (s *server) handleModeCommand(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-	if !s.allowRate(clientIP(r)) {
+	if !s.allowRate(s.clientIP(r)) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
@@ -485,7 +491,7 @@ func (s *server) handleModeCommand(w http.ResponseWriter, r *http.Request) {
 // for each request. Public like the keys: the bus verifies the record against
 // its pinned key and never trusts this endpoint. Its own rate bucket.
 func (s *server) handleMode(w http.ResponseWriter, r *http.Request) {
-	if !s.modeRate.allow(clientIP(r)) {
+	if !s.modeRate.allow(s.clientIP(r)) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
@@ -513,7 +519,7 @@ func (s *server) handleMode(w http.ResponseWriter, r *http.Request) {
 // answer is private to the caller.
 func (s *server) handleMandateCommand(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-	if !s.allowRate(clientIP(r)) {
+	if !s.allowRate(s.clientIP(r)) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
@@ -532,7 +538,7 @@ func (s *server) handleMandateCommand(w http.ResponseWriter, r *http.Request) {
 // handleMandate publishes a channel's mandate as a signed record, signed fresh
 // for each request. Public like the modes; its own rate bucket.
 func (s *server) handleMandate(w http.ResponseWriter, r *http.Request) {
-	if !s.mandateRate.allow(clientIP(r)) {
+	if !s.mandateRate.allow(s.clientIP(r)) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
@@ -559,7 +565,7 @@ func (s *server) handleMandate(w http.ResponseWriter, r *http.Request) {
 // request with a short expiry. Public like the modes and mandates; its own rate
 // bucket. 404 with `no attestation` means none; any other failure is no 404.
 func (s *server) handleAttestation(w http.ResponseWriter, r *http.Request) {
-	if !s.attestationRate.allow(clientIP(r)) {
+	if !s.attestationRate.allow(s.clientIP(r)) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
@@ -615,15 +621,26 @@ func bearer(r *http.Request) string {
 	return strings.TrimSpace(h[7:])
 }
 
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
+// clientIP is the address the rate buckets count. Each trusted proxy appends the
+// peer it saw to X-Forwarded-For, so only entries from the right are the proxies'
+// own; the left ones are whatever the client sent. With too few entries, or none,
+// or with TRUSTED_PROXY_HOPS=0, the connection's own address counts.
+func (s *server) clientIP(r *http.Request) string {
+	if n := s.cfg.trustedProxyHops; n > 0 {
+		var entries []string
+		for _, h := range r.Header.Values("X-Forwarded-For") {
+			entries = append(entries, strings.Split(h, ",")...)
+		}
+		if len(entries) >= n {
+			if ip := strings.TrimSpace(entries[len(entries)-n]); ip != "" {
+				return ip
+			}
+		}
 	}
-	host, _, _ := strings.Cut(r.RemoteAddr, ":")
-	if host == "" {
-		return r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && host != "" {
+		return host
 	}
-	return host
+	return r.RemoteAddr
 }
 
 func splitList(v string) []string {
