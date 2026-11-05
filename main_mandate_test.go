@@ -28,16 +28,17 @@ func newMandateServer(t *testing.T, att *core.Attestor, mandateTokens, modeToken
 	mm.chanNames = map[string]string{"home": mandateHome}
 	ts := mm.server(t)
 	cfg := config{
-		publicChatURL:          "https://chat.example",
-		rateLimitPerMin:        100,
-		modeRateLimitPerMin:    100,
-		mandateRateLimitPerMin: 100,
-		modeTokens:             modeTokens,
-		modeStore:              filepath.Join(t.TempDir(), "modes.json"),
-		mandateTokens:          mandateTokens,
-		mandateStore:           filepath.Join(t.TempDir(), "mandates.json"),
-		attestor:               att,
-		mm:                     mattermost.Config{URL: ts.URL, Token: "admin-pat", Team: "ai-agents", TokenDescription: "agent-registrar"},
+		publicChatURL:              "https://chat.example",
+		rateLimitPerMin:            100,
+		modeRateLimitPerMin:        100,
+		mandateRateLimitPerMin:     100,
+		attestationRateLimitPerMin: 100,
+		modeTokens:                 modeTokens,
+		modeStore:                  filepath.Join(t.TempDir(), "modes.json"),
+		mandateTokens:              mandateTokens,
+		mandateStore:               filepath.Join(t.TempDir(), "mandates.json"),
+		attestor:                   att,
+		mm:                         mattermost.Config{URL: ts.URL, Token: "admin-pat", Team: "ai-agents", TokenDescription: "agent-registrar"},
 	}
 	cfg.policy.SharedSecret = "secret"
 	s, err := newServer(cfg, ts.Client(), slog.New(slog.NewTextHandler(io.Discard, nil)))

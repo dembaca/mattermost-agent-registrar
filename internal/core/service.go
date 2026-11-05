@@ -26,6 +26,8 @@ var (
 	ErrNoMode = errors.New("no mode set")
 	// ErrNoMandate: no mandate is set for the channel.
 	ErrNoMandate = errors.New("no mandate set")
+	// ErrNoAttestation: no attestation is recorded for the bot, or it is gone.
+	ErrNoAttestation = errors.New("no attestation")
 )
 
 var (
@@ -65,7 +67,10 @@ type Service struct {
 	Modes    *ModeStore // nil: no ask modes per channel
 	// Mandates: nil means no mandates per channel.
 	Mandates *MandateStore
-	Now      func() time.Time
+	// Claims: nil means no attestation endpoint; the claims of every bot
+	// registered while it is set are kept here.
+	Claims *ClaimStore
+	Now    func() time.Time
 
 	enrollMu sync.Mutex // serialises enrollments, so MaxBots holds under concurrency
 }
@@ -260,6 +265,7 @@ func (s *Service) Register(ctx context.Context, cred string, req RegisterRequest
 			s.undo(ctx, agent)
 			return Registration{}, fmt.Errorf("attest: %w", err)
 		}
+		s.remember(claims)
 		s.Log.Info("registered unbound agent", "username", username)
 		return out, nil
 	}
@@ -282,6 +288,7 @@ func (s *Service) Register(ctx context.Context, cred string, req RegisterRequest
 	if out.Attestation, err = s.attest(claims); err != nil {
 		s.Log.Error("attest", "err", err, "username", username)
 	}
+	s.remember(claims)
 	s.Log.Info("registered bound agent", "username", username, "owner", owner.Handle, "token_id", tok.ID)
 	return out, nil
 }
@@ -295,6 +302,7 @@ func (s *Service) attest(c AttestClaims) (string, error) {
 }
 
 func (s *Service) undo(ctx context.Context, a Agent) {
+	s.forget(a)
 	if err := s.Provider.RevokeAgent(ctx, a); err != nil {
 		s.Log.Error("undo registration", "err", err, "user_id", a.ID)
 	}
@@ -329,6 +337,9 @@ func (s *Service) Unregister(ctx context.Context, cred, name string) error {
 		if s.Store != nil {
 			_ = s.Store.RemoveAgent(username)
 		}
+		if s.Claims != nil {
+			_ = s.Claims.RemoveUsername(username)
+		}
 		return nil
 	}
 	ok := s.isSharedSecret(cred)
@@ -356,6 +367,7 @@ func (s *Service) disable(ctx context.Context, agent Agent) error {
 	if err := s.Provider.RevokeAgent(ctx, agent); err != nil {
 		return fmt.Errorf("%w: disable: %v", ErrUpstream, err)
 	}
+	s.forget(agent)
 	if s.Store != nil {
 		if err := s.Store.RemoveAgent(agent.Username); err != nil {
 			s.Log.Warn("forget agent", "err", err, "username", agent.Username)

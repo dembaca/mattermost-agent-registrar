@@ -18,7 +18,7 @@ import (
 )
 
 // version is the release; CHANGELOG.md and the image tag in CI follow it.
-const version = "0.6.0"
+const version = "0.7.0"
 
 // pruneEvery is how often the token store is pruned while running.
 const pruneEvery = time.Hour
@@ -32,15 +32,18 @@ type config struct {
 	modeRateLimitPerMin int
 	// mandateRateLimitPerMin is the own bucket of GET /register/v1/mandates/….
 	mandateRateLimitPerMin int
-	enrollStore            string
-	pepper                 string
-	modeTokens             []string // verification tokens of the mode command; none: no command
-	modeStore              string
-	mandateTokens          []string // verification tokens of the mandate command; none: no command
-	mandateStore           string
-	mm                     mattermost.Config
-	policy                 core.Policy
-	attestor               *core.Attestor // nil: no attestation, no mode records
+	// attestationRateLimitPerMin is the own bucket of GET /register/v1/attestations/….
+	attestationRateLimitPerMin int
+	attestationStore           string
+	enrollStore                string
+	pepper                     string
+	modeTokens                 []string // verification tokens of the mode command; none: no command
+	modeStore                  string
+	mandateTokens              []string // verification tokens of the mandate command; none: no command
+	mandateStore               string
+	mm                         mattermost.Config
+	policy                     core.Policy
+	attestor                   *core.Attestor // nil: no attestation, no mode records
 }
 
 type server struct {
@@ -52,8 +55,9 @@ type server struct {
 	rate     *limiter
 	modeRate *limiter
 	// mandatePort verifies the mandate command's tokens; nil without them.
-	mandatePort core.ProviderPort
-	mandateRate *limiter
+	mandatePort     core.ProviderPort
+	mandateRate     *limiter
+	attestationRate *limiter
 }
 
 // limiter is a per-IP sliding window of one minute.
@@ -139,17 +143,19 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return d
 	}
 	cfg := config{
-		listenAddr:             env("LISTEN_ADDR", ":8080"),
-		publicChatURL:          strings.TrimRight(env("PUBLIC_CHAT_URL", "https://chat.bgl.dembach.org"), "/"),
-		rateLimitPerMin:        30,
-		modeRateLimitPerMin:    120,
-		mandateRateLimitPerMin: 120,
-		enrollStore:            env("ENROLLMENT_STORE", "/data/enrollments.json"),
-		pepper:                 env("ENROLLMENT_PEPPER", ""),
-		modeTokens:             splitList(env("MODE_COMMAND_TOKEN", "")),
-		modeStore:              env("MODE_STORE", "/data/modes.json"),
-		mandateTokens:          splitList(env("MANDATE_COMMAND_TOKEN", "")),
-		mandateStore:           env("MANDATE_STORE", "/data/mandates.json"),
+		listenAddr:                 env("LISTEN_ADDR", ":8080"),
+		publicChatURL:              strings.TrimRight(env("PUBLIC_CHAT_URL", "https://chat.bgl.dembach.org"), "/"),
+		rateLimitPerMin:            30,
+		modeRateLimitPerMin:        120,
+		mandateRateLimitPerMin:     120,
+		attestationRateLimitPerMin: 120,
+		attestationStore:           env("ATTESTATION_STORE", "/data/attestations.json"),
+		enrollStore:                env("ENROLLMENT_STORE", "/data/enrollments.json"),
+		pepper:                     env("ENROLLMENT_PEPPER", ""),
+		modeTokens:                 splitList(env("MODE_COMMAND_TOKEN", "")),
+		modeStore:                  env("MODE_STORE", "/data/modes.json"),
+		mandateTokens:              splitList(env("MANDATE_COMMAND_TOKEN", "")),
+		mandateStore:               env("MANDATE_STORE", "/data/mandates.json"),
 		mm: mattermost.Config{
 			URL:              strings.TrimRight(need("MATTERMOST_URL"), "/"),
 			Token:            need("MATTERMOST_TOKEN"),
@@ -255,7 +261,8 @@ func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, erro
 	}
 	s := &server{cfg: cfg, svc: svc, port: port, log: log,
 		rate: newLimiter(cfg.rateLimitPerMin), modeRate: newLimiter(cfg.modeRateLimitPerMin),
-		mandateRate: newLimiter(cfg.mandateRateLimitPerMin)}
+		mandateRate:     newLimiter(cfg.mandateRateLimitPerMin),
+		attestationRate: newLimiter(cfg.attestationRateLimitPerMin)}
 	if cfg.attestor != nil {
 		// The store is read for GET /register/v1/modes/… even without the
 		// command, so modes set earlier stay published.
@@ -276,6 +283,12 @@ func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, erro
 			return nil, err
 		}
 		svc.Mandates = mds
+		// And for GET /register/v1/attestations/…, whichever way a bot registers.
+		cs, err := core.OpenClaimStore(cfg.attestationStore)
+		if err != nil {
+			return nil, err
+		}
+		svc.Claims = cs
 		if len(cfg.mandateTokens) > 0 {
 			mcfg := cfg.mm
 			mcfg.CommandTokens = cfg.mandateTokens
@@ -306,6 +319,9 @@ func (s *server) routes() http.Handler {
 	}
 	if s.mandatePort != nil {
 		mux.HandleFunc("POST /register/v1/mandate", s.handleMandateCommand)
+	}
+	if s.svc.Claims != nil {
+		mux.HandleFunc("GET /register/v1/attestations/{bot_id}", s.handleAttestation)
 	}
 	return mux
 }
@@ -532,6 +548,37 @@ func (s *server) handleMandate(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no mandate set"})
 	case err != nil:
 		s.log.Error("sign mandate record", "err", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
+	default:
+		_ = json.NewEncoder(w).Encode(map[string]string{"record": rec})
+	}
+}
+
+// handleAttestation publishes a bot's attestation, signed fresh for each
+// request with a short expiry. Public like the modes and mandates; its own rate
+// bucket. 404 with `no attestation` means none; any other failure is no 404.
+func (s *server) handleAttestation(w http.ResponseWriter, r *http.Request) {
+	if !s.attestationRate.allow(clientIP(r)) {
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
+	rec, err := s.svc.AttestationRecord(r.Context(), r.PathValue("bot_id"))
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	switch {
+	case errors.Is(err, core.ErrBadRequest):
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid bot id"})
+	case errors.Is(err, core.ErrNoAttestation):
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no attestation"})
+	case errors.Is(err, core.ErrUpstream):
+		s.log.Error("attestation record", "err", err)
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "lookup failed"})
+	case err != nil:
+		s.log.Error("sign attestation record", "err", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
 	default:
