@@ -256,6 +256,71 @@ The bus accepts a record only with the registrar's keys pinned and only when
 trusted, only the signature.
 The record names who set the mode; anyone who knows a channel id can read it.
 
+### Mandate per channel: `/agent-mandate`
+
+A trusted human, typing the command in a project channel (the *target home*),
+says: the coordinator of `~<home>` gives tasks and priorities for the agents
+in this channel. The registrar stores that and publishes it as a signed record;
+the bus reads it from there.
+
+| Command | Effect |
+|---------|--------|
+| `/agent-mandate set ~<home> [until YYYY-MM-DD] [note]` | set the mandate of this channel; a new command replaces the old one |
+| `/agent-mandate off` | remove the mandate of this channel |
+| `/agent-mandate` or `/agent-mandate status` | show it: home, who set it and when, until, note |
+
+`set` and `until` in any case, the `~` is optional.
+`~<home>` is a channel **name**, resolved to its id in the team the command was
+typed in. Only a channel the human is a member of can be named: an unknown
+name and a channel the human is not in get the same answer (`~x is not a channel
+you are a member of (or it does not exist)`), so a stranger cannot tell whether
+a private channel of that name exists, and nothing is stored. The home's id goes
+into the public record, and a private channel's id is not handed out.
+**The record, with its note, is public** (`GET /register/v1/mandates/<channel id>`
+needs no login): the note is not a place for anything confidential, and the usage
+text says so. `until` is a calendar date, today or later and at most 30
+days ahead; without it nothing is claimed (the bus applies its own default of 7
+days). Everything after the optional date is a free-text note: one line, at
+most 200 characters, longer is refused. Every answer is private to the caller.
+The channel is the one the command is typed in; direct and group messages are
+refused, and only members of the channel (active, no bots, no guests) can read
+or set its mandate. Each change is logged with the setter's handle, the channel
+id and the home's id.
+
+`GET /register/v1/mandates/{channel_id}` (public, no auth) returns the current
+mandate as a record signed for this request:
+
+| Status | Body |
+|--------|------|
+| `200` | `{"record":"<jws>"}` |
+| `404` | `{"error":"no mandate set"}` |
+| `400` | `{"error":"invalid channel id"}`: not 26 characters of `[a-z0-9]` |
+
+It has its own rate bucket (120 requests per minute per IP) and sends
+`Cache-Control: no-store`. The route exists only with an attestation key;
+without `MANDATE_COMMAND_TOKEN` it still publishes the mandates set earlier.
+
+The record is a compact JWS signed with the attestation key (same `kid` as in
+`GET /register/v1/keys`). The header is exactly
+`{"alg":"EdDSA","typ":"mm-agent-mandate+jwt","kid":"<kid>"}`: its own `typ`, so
+it never passes as a mode record or an attestation. The payload is compact JSON
+with these claims, in this order:
+
+| Claim | Meaning |
+|-------|---------|
+| `channel_id` | the channel the command was typed in |
+| `home` | channel id of the named home, whose coordinator holds the mandate |
+| `set_by` | the setter's username, lower case, without `@` |
+| `set_by_id` | the setter's Mattermost user id |
+| `set_at_ms` | when the human set it, unix **milliseconds** |
+| `until` | `YYYY-MM-DD`, or `""` when none |
+| `note` | free text, may be `""` |
+| `iat`, `exp` | unix seconds; signed fresh for each request, `exp` is `iat` + 1 h |
+
+The bus accepts a record only with the registrar's keys pinned and only when
+`set_by` is a human the agent's session trusts. The record names who set the
+mandate; anyone who knows a channel id can read it.
+
 ### Health
 
 `GET /healthz` → `ok`
@@ -263,7 +328,7 @@ The record names who set the mode; anyone who knows a channel id can read it.
 ### Version
 
 `GET /register/v1/version` (public, no auth, same rate limit as the keys) returns
-the deployed registrar version as `{"version":"0.5.2"}`. `/healthz` stays `ok`.
+the deployed registrar version as `{"version":"0.6.0"}`. `/healthz` stays `ok`.
 
 ## Environment
 
@@ -288,6 +353,8 @@ the deployed registrar version as `{"version":"0.5.2"}`. `/healthz` stays `ok`.
 | `ATTESTATION_KEY_FILE` | no | Path to a file holding the same value (whitespace around it is trimmed). Setting both this and `ATTESTATION_KEY` is a configuration error |
 | `ATTESTATION_TTL` | no | Default `30d`. Lifetime of an attestation (`d`, `w`, or Go durations like `12h`) |
 | `MODE_COMMAND_TOKEN` | no | Verification token of the `/agent-ask-mode` slash command; comma-separated for one command per team. Enables `POST /register/v1/mode`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of `SLASH_COMMAND_TOKEN` and `ENROLLMENT_PEPPER` |
+| `MANDATE_COMMAND_TOKEN` | no | Verification token of the `/agent-mandate` slash command; comma-separated for one command per team. Enables `POST /register/v1/mandate`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of the other command tokens |
+| `MANDATE_STORE` | no | Default `/data/mandates.json`. The mandate per channel, its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `MODE_STORE` | no | Default `/data/modes.json`. The mode per channel, its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `BOT_USERNAME_PREFIX` | no | Default `agent-` |
 | `DEFAULT_TEAM_NAME` | no | Default `ai-agents`. Team new bots join, and the team `--channels` names are looked up in; it must exist |
@@ -346,6 +413,19 @@ first, and use the same names as `MM_TEAM` and `MM_CHANNEL` in the bus plugin.
    to the token store).
 5. Agents fetch `GET <registrar>/register/v1/modes/{channel_id}` for their
    channels and verify the record as described [above](#ask-mode-per-channel-agent-ask-mode).
+
+## Setup for `/agent-mandate`
+
+1. **Configure an attestation key** (as for the ask mode); pin its public key in the bus.
+2. **Create the slash command.** *Integrations → Slash Commands → Add* in the
+   team(s) whose channels get mandates: trigger word `agent-mandate`, request URL
+   `https://<registrar>/register/v1/mandate`, method `POST`, autocomplete on with
+   the hint `set ~<home> [until YYYY-MM-DD] [note] | off | status`.
+3. **Copy the command's token into `MANDATE_COMMAND_TOKEN`** (comma-separate the
+   tokens of several teams). Its own token: no other command's token verifies it.
+4. **Mount a volume for `MANDATE_STORE`** (the default `/data/mandates.json`).
+5. Agents fetch `GET <registrar>/register/v1/mandates/{channel_id}` and verify the
+   record as described [above](#mandate-per-channel-agent-mandate).
 
 ## Migration from the shared secret
 
@@ -432,6 +512,7 @@ docker run --rm -p 8080:8080 \
   -e REGISTRATION_SECRET=... \
   -e ATTESTATION_KEY_FILE=/run/secrets/attestation-key \
   -e MODE_COMMAND_TOKEN=... \
+  -e MANDATE_COMMAND_TOKEN=... \
   ghcr.io/dembaca/mattermost-agent-registrar:0.5.1
 ```
 

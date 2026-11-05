@@ -119,6 +119,7 @@ func (m *Adapter) VerifyInvocation(r *http.Request) (core.Invocation, error) {
 		Command:   r.PostForm.Get("command"),
 		Text:      r.PostForm.Get("text"),
 		ChannelID: r.PostForm.Get("channel_id"),
+		TeamID:    r.PostForm.Get("team_id"),
 	}, nil
 }
 
@@ -246,6 +247,23 @@ func (m *Adapter) HumanInChannel(ctx context.Context, h core.Human, channelID st
 		return false, nil
 	}
 	return false, err
+}
+
+// ChannelIDByName resolves a public or private channel name in the team with
+// id teamID. Direct and group messages have no names in a team.
+func (m *Adapter) ChannelIDByName(ctx context.Context, teamID, name string) (string, error) {
+	var ch channel
+	err := m.do(ctx, http.MethodGet, "/api/v4/teams/"+url.PathEscape(teamID)+"/channels/name/"+url.PathEscape(name), nil, m.Cfg.Token, &ch)
+	if err != nil {
+		if isNotFound(err) {
+			return "", core.ErrNoSuchChannel
+		}
+		return "", err
+	}
+	if ch.Type != "O" && ch.Type != "P" {
+		return "", core.ErrNoSuchChannel
+	}
+	return ch.ID, nil
 }
 
 // FindAgent finds an account by username.

@@ -28,6 +28,7 @@ type Invocation struct {
 	Command   string // the trigger as typed, e.g. "/agent-token"; used in help texts only
 	Text      string // everything after the trigger
 	ChannelID string // provider id of the channel it was typed in
+	TeamID    string // provider id of the team it was typed in; "" when unknown
 }
 
 // ProviderPort is everything the protocol needs from a chat provider.
@@ -53,6 +54,10 @@ type ProviderPort interface {
 	// id channelID. ErrNoSuchChannel when it does not exist, ErrNotTeamChannel
 	// when it is a direct or group message.
 	HumanInChannel(ctx context.Context, h Human, channelID string) (bool, error)
+	// ChannelIDByName resolves the name of a team channel (public or private)
+	// in the team with provider id teamID to its channel id.
+	// ErrNoSuchChannel when the team has no such channel.
+	ChannelIDByName(ctx context.Context, teamID, name string) (string, error)
 	// FindAgent finds an account by username; nil when there is none.
 	FindAgent(ctx context.Context, username string) (*Agent, error)
 	// AgentForCredential returns the account a credential (bot token) belongs to.

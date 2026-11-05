@@ -247,6 +247,37 @@ func TestHumanInChannel(t *testing.T) {
 	}
 }
 
+func TestChannelIDByName(t *testing.T) {
+	mux := http.NewServeMux()
+	types := map[string]string{"pub": "O", "priv": "P", "dm": "D"}
+	mux.HandleFunc("GET /api/v4/teams/{tid}/channels/name/{name}", func(w http.ResponseWriter, r *http.Request) {
+		typ, ok := types[r.PathValue("name")]
+		switch {
+		case r.PathValue("name") == "broken":
+			http.Error(w, "boom", http.StatusInternalServerError)
+		case !ok || r.PathValue("tid") != "team-1":
+			http.NotFound(w, nil)
+		default:
+			_, _ = w.Write([]byte(`{"id":"id-` + r.PathValue("name") + `","type":"` + typ + `"}`))
+		}
+	})
+	m := adapter(t, mux)
+	ctx := context.Background()
+	for name, want := range map[string]string{"pub": "id-pub", "priv": "id-priv"} {
+		if got, err := m.ChannelIDByName(ctx, "team-1", name); err != nil || got != want {
+			t.Errorf("%s: %q %v", name, got, err)
+		}
+	}
+	for _, c := range []struct{ team, name string }{{"team-1", "nope"}, {"team-1", "dm"}, {"team-2", "pub"}} {
+		if _, err := m.ChannelIDByName(ctx, c.team, c.name); !errors.Is(err, core.ErrNoSuchChannel) {
+			t.Errorf("%s/%s: %v", c.team, c.name, err)
+		}
+	}
+	if _, err := m.ChannelIDByName(ctx, "team-1", "broken"); err == nil || errors.Is(err, core.ErrNoSuchChannel) {
+		t.Errorf("upstream error: %v", err)
+	}
+}
+
 func TestVerifyInvocationCarriesChannel(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v4/users/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -256,9 +287,9 @@ func TestVerifyInvocationCarriesChannel(t *testing.T) {
 	m.Cfg.CommandTokens = []string{"mode-cmd"}
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.PostForm = map[string][]string{"token": {"mode-cmd"}, "user_id": {"u1"}, "channel_id": {"c1"},
-		"command": {"/agent-mode"}, "text": {"status"}}
+		"command": {"/agent-mode"}, "text": {"status"}, "team_id": {"t1"}}
 	inv, err := m.VerifyInvocation(req)
-	if err != nil || inv.ChannelID != "c1" || inv.Human.Handle != "alice" || inv.Command != "/agent-mode" || inv.Text != "status" {
+	if err != nil || inv.ChannelID != "c1" || inv.TeamID != "t1" || inv.Human.Handle != "alice" || inv.Command != "/agent-mode" || inv.Text != "status" {
 		t.Fatalf("%+v %v", inv, err)
 	}
 }
