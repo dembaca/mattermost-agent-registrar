@@ -6,9 +6,12 @@
   first `X-Forwarded-For` entry, which the client sets itself (the gateway only
   appends), so a forged header gave every request a fresh bucket and bypassed
   the limits of registration, modes, mandates and attestations. New env
-  `TRUSTED_PROXY_HOPS` (default `1`): the entry that many places from the right
+  `TRUSTED_PROXY_HOPS` (default `0`): the entry that many places from the right
   counts; without the header or with too few entries the peer address counts;
   `0` ignores the header. Peer addresses in IPv6 form are read correctly too.
+- **Upgrade:** the default `0` trusts no header. Behind a proxy, set
+  `TRUSTED_PROXY_HOPS` to its number of hops (`1` for one proxy); left at `0`, all
+  clients share the bucket of the proxy's address and get `429` together.
 - No change to the API, the keys, the modes or the mandates.
 
 ## 0.7.0

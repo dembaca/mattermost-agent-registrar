@@ -37,7 +37,7 @@ type config struct {
 	attestationRateLimitPerMin int
 	// trustedProxyHops is how many proxies in front of the registrar append to
 	// X-Forwarded-For; the entry that many places from the right is the client.
-	// 0: the header is ignored.
+	// 0 (the default): the header is ignored, nothing is trusted unconfigured.
 	trustedProxyHops int
 	attestationStore string
 	enrollStore      string
@@ -155,7 +155,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		modeRateLimitPerMin:        120,
 		mandateRateLimitPerMin:     120,
 		attestationRateLimitPerMin: 120,
-		trustedProxyHops:           num("TRUSTED_PROXY_HOPS", 1),
+		trustedProxyHops:           num("TRUSTED_PROXY_HOPS", 0),
 		attestationStore:           env("ATTESTATION_STORE", "/data/attestations.json"),
 		enrollStore:                env("ENROLLMENT_STORE", "/data/enrollments.json"),
 		pepper:                     env("ENROLLMENT_PEPPER", ""),

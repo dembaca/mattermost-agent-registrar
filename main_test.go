@@ -804,7 +804,7 @@ func TestLoadConfigTrustedProxyHops(t *testing.T) {
 		env := map[string]string{"MATTERMOST_URL": "http://mm", "MATTERMOST_TOKEN": "pat", "REGISTRATION_SECRET": "s", "TRUSTED_PROXY_HOPS": v}
 		return loadConfig(func(k string) string { return env[k] })
 	}
-	for v, want := range map[string]int{"": 1, "0": 0, "2": 2} {
+	for v, want := range map[string]int{"": 0, "0": 0, "1": 1, "2": 2} {
 		if cfg, err := load(v); err != nil || cfg.trustedProxyHops != want {
 			t.Errorf("%q: got %d, %v", v, cfg.trustedProxyHops, err)
 		}

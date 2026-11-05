@@ -396,7 +396,7 @@ the deployed registrar version as `{"version":"0.7.1"}`. `/healthz` stays `ok`.
 | `DEFAULT_CHANNEL_NAME` | no | Default `agents`. Channel unbound bots join, and bound bots whose token names no channels; it must exist |
 | `HIDE_BOT_DM` | no | Default `true`. Hide the admin↔bot welcome DM from the registrar account's sidebar (`direct_channel_show=false`) and mark it read, at creation and again on unregister: the webapp always shows an unread DM, whatever the preference says. Set `false` to keep those DMs visible. |
 | `LISTEN_ADDR` | no | Default `:8080` |
-| `TRUSTED_PROXY_HOPS` | no | Default `1`. How many proxies in front of the registrar append to `X-Forwarded-For`. The rate buckets count the entry that many places from the right; `0` ignores the header. See [Behind a proxy](#behind-a-proxy) |
+| `TRUSTED_PROXY_HOPS` | no | Default `0`: the header is ignored. Behind a proxy set the number of proxies that append to `X-Forwarded-For`; the rate buckets then count the entry that many places from the right. Left at `0` behind a proxy, all clients share the proxy's bucket. See [Behind a proxy](#behind-a-proxy) |
 
 At least one way to register must be configured, or the registrar does not start.
 The registrar creates no teams or channels. Create the team and the default channel
@@ -485,15 +485,16 @@ The rate buckets (registration, modes, mandates, attestations) count clients by
 IP. A proxy appends the address it saw to `X-Forwarded-For` and keeps what the
 client already put there, so the first entry is the client's claim, not a fact.
 The registrar therefore takes the entry `TRUSTED_PROXY_HOPS` places from the
-right: `1` for one proxy (the default, e.g. the Cilium gateway), `2` for two in a
-row. Without the header, or with fewer entries than hops, the connection's own
-address counts; with `0` the header is ignored. Set it to the real number of
-proxies: too high lets a client pick its bucket, too low counts the proxy. The
+right: `1` for one proxy (e.g. the Cilium gateway), `2` for two in a row. The
+default is `0`: the header is ignored and the connection's own address counts, so
+an unconfigured registrar trusts no header. Behind a proxy, set the number of
+hops; otherwise all clients share the bucket of the proxy's address. With fewer
+entries than hops the connection's own address counts as well. Set it to the real
+number of proxies: too high lets a client pick its bucket, too low counts the proxy. The
 proxy must append its peer (Envoy: `use_remote_address: true`, `skip_xff_append:
 false`); one in transparent mode passes the client's header through and counts as
-`0`. Exposed directly, without a proxy, set `0`: the default `1` would trust the
-client's own last entry. The chosen entry must be an IP, or the peer address
-counts.
+`0`. A value above the real number of proxies would trust the client's own last
+entry. The chosen entry must be an IP, or the peer address counts.
 
 ## Threat model
 
