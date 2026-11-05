@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.2
+
+- **The rate limiter forgets quiet addresses.** It kept every client address it
+  had ever seen, so memory grew with the number of distinct addresses (an IPv6
+  /64 holder has 2^64 of them). Keys without a request in the last minute are
+  now dropped, checked at most once a minute; the table is rebuilt then, so the
+  memory of a flood of distinct addresses is given back. No change to the limits.
+
 ## 0.7.1
 
 - **Rate buckets count the client behind a proxy correctly.** `clientIP` took the

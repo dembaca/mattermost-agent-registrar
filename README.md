@@ -362,7 +362,7 @@ mandate; anyone who knows a channel id can read it.
 ### Version
 
 `GET /register/v1/version` (public, no auth, same rate limit as the keys) returns
-the deployed registrar version as `{"version":"0.7.1"}`. `/healthz` stays `ok`.
+the deployed registrar version as `{"version":"0.7.2"}`. `/healthz` stays `ok`.
 
 ## Environment
 

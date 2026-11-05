@@ -19,7 +19,7 @@ import (
 )
 
 // version is the release; CHANGELOG.md and the image tag in CI follow it.
-const version = "0.7.1"
+const version = "0.7.2"
 
 // pruneEvery is how often the token store is pruned while running.
 const pruneEvery = time.Hour
@@ -70,6 +70,8 @@ type limiter struct {
 	perMin int
 	mu     sync.Mutex
 	hits   map[string][]time.Time
+	// swept is when keys without a hit in the last minute were last dropped.
+	swept time.Time
 }
 
 func newLimiter(perMin int) *limiter {
@@ -600,6 +602,20 @@ func (l *limiter) allow(ip string) bool {
 	defer l.mu.Unlock()
 	now := time.Now()
 	cut := now.Add(-time.Minute)
+	// A key that stays quiet for a minute holds nothing; without this sweep the
+	// map would keep every address ever seen.
+	if now.Sub(l.swept) >= time.Minute {
+		// A new map, because a Go map keeps its table size after deletes: a flood
+		// of distinct addresses would leave the memory at its peak.
+		fresh := make(map[string][]time.Time, len(l.hits))
+		for k, ts := range l.hits {
+			if len(ts) > 0 && ts[len(ts)-1].After(cut) {
+				fresh[k] = ts
+			}
+		}
+		l.hits = fresh
+		l.swept = now
+	}
 	var kept []time.Time
 	for _, t := range l.hits[ip] {
 		if t.After(cut) {
