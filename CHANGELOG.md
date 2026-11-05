@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.2
+
+- **The rate limiter forgets quiet addresses.** It kept every client address it
+  had ever seen, so memory grew with the number of distinct addresses (an IPv6
+  /64 holder has 2^64 of them). Keys without a request in the last minute are
+  now dropped, checked at most once a minute. No change to the limits.
+
 ## 0.7.0
 
 - **`GET /register/v1/attestations/{bot_id}`**: a bot's attestation for other

@@ -759,3 +759,25 @@ func TestLoadConfigModeCommand(t *testing.T) {
 		t.Fatalf("no mode command: %v", err)
 	}
 }
+
+func TestLimiterForgetsQuietKeys(t *testing.T) {
+	l := newLimiter(2)
+	old := time.Now().Add(-2 * time.Minute)
+	l.hits["198.51.100.1"] = []time.Time{old}
+	l.hits["198.51.100.2"] = []time.Time{old, time.Now()}
+	l.swept = old
+	if !l.allow("203.0.113.9") {
+		t.Fatal("a new key must be allowed")
+	}
+	if _, ok := l.hits["198.51.100.1"]; ok {
+		t.Error("a key quiet for a minute must be dropped")
+	}
+	if _, ok := l.hits["198.51.100.2"]; !ok {
+		t.Error("a key with a recent hit must stay")
+	}
+	// the window still limits
+	l.allow("203.0.113.9")
+	if l.allow("203.0.113.9") {
+		t.Error("third hit within the minute must be refused")
+	}
+}
