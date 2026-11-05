@@ -29,6 +29,7 @@ type fakeProvider struct {
 	names      map[string]string          // "team id/channel name" -> channel id
 	failBind   bool
 	failRevoke map[string]bool // usernames whose RevokeAgent fails
+	failFind   bool            // FindAgent fails
 	next       int
 }
 
@@ -132,6 +133,9 @@ func (f *fakeProvider) ChannelIDByName(_ context.Context, team, name string) (st
 func (f *fakeProvider) FindAgent(_ context.Context, username string) (*Agent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failFind {
+		return nil, errors.New("502 find")
+	}
 	if a, ok := f.agents[username]; ok {
 		return &a, nil
 	}

@@ -104,21 +104,24 @@ func TestAttestationRecordNone(t *testing.T) {
 		t.Fatalf("after unregister: %v", err)
 	}
 
-	// Removed outside the registrar: the read finds it gone and forgets it.
+	// Gone from the chat system, or the username taken by another account: a
+	// read answers 404 and deletes nothing (a 404 may be a proxy's).
 	reg, _ = s.Register(ctx, "shared", RegisterRequest{Name: "s-3"})
+	gone := f.agents[reg.Agent.Username]
 	delete(f.agents, reg.Agent.Username)
 	if _, err := s.AttestationRecord(ctx, reg.Agent.ID); !errors.Is(err, ErrNoAttestation) {
 		t.Fatalf("bot gone: %v", err)
 	}
-	if _, ok := s.Claims.Get(reg.Agent.ID); ok {
-		t.Fatal("claims kept for a bot that is gone")
+	if _, ok := s.Claims.Get(reg.Agent.ID); !ok {
+		t.Fatal("a read deleted the claims")
 	}
-
-	// The username now belongs to another account: not this bot's claim.
-	reg, _ = s.Register(ctx, "shared", RegisterRequest{Name: "s-4"})
 	f.agents[reg.Agent.Username] = Agent{ID: "someone-else", Username: reg.Agent.Username}
 	if _, err := s.AttestationRecord(ctx, reg.Agent.ID); !errors.Is(err, ErrNoAttestation) {
 		t.Fatalf("username reused: %v", err)
+	}
+	f.agents[reg.Agent.Username] = gone // back again: the record is still there
+	if _, err := s.AttestationRecord(ctx, reg.Agent.ID); err != nil {
+		t.Fatalf("bot back: %v", err)
 	}
 
 	// Without a key or a store there is nothing to read.
@@ -154,5 +157,49 @@ func TestClaimStoreSurvivesARestart(t *testing.T) {
 	}
 	if _, ok := again.Get("b2"); ok {
 		t.Fatal("RemoveUsername kept the record")
+	}
+}
+
+func TestAttestationRecordAsksTheProviderRarely(t *testing.T) {
+	s, f, _ := claimService(t)
+	ctx := context.Background()
+	reg, _ := s.Register(ctx, "shared", RegisterRequest{Name: "c-1"})
+	mustRecord(t, s, reg.Agent.ID)
+
+	// Within existsTTL a found bot is not asked for again, even when it is gone.
+	f.failFind = true
+	mustRecord(t, s, reg.Agent.ID)
+	// A failed lookup is no 404 and is not remembered.
+	s.Now = func() time.Time { return time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC).Add(existsTTL + time.Second) }
+	if _, err := s.AttestationRecord(ctx, reg.Agent.ID); !errors.Is(err, ErrUpstream) || errors.Is(err, ErrNoAttestation) {
+		t.Fatalf("lookup fails: %v", err)
+	}
+	f.failFind = false
+	mustRecord(t, s, reg.Agent.ID)
+	// An absent bot is not remembered either: gone, then back, answers at once.
+	s.Now = func() time.Time { return time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC).Add(3 * existsTTL) }
+	back := f.agents[reg.Agent.Username]
+	delete(f.agents, reg.Agent.Username)
+	if _, err := s.AttestationRecord(ctx, reg.Agent.ID); !errors.Is(err, ErrNoAttestation) {
+		t.Fatalf("gone: %v", err)
+	}
+	f.agents[reg.Agent.Username] = back
+	mustRecord(t, s, reg.Agent.ID)
+}
+
+func TestRevokingATokenForgetsTheClaimsOfItsBots(t *testing.T) {
+	s, f, _ := claimService(t)
+	ctx := context.Background()
+	tok, _ := mint(t, s, alice, "")
+	gone, _ := register(s, tok, "name=r-1")
+	here, _ := register(s, tok, "name=r-2")
+	delete(f.agents, gone.Agent.Username) // removed in the chat system meanwhile
+	inv := alice
+	inv.Text = "revoke all"
+	s.Command(ctx, inv)
+	for name, id := range map[string]string{"gone": gone.Agent.ID, "here": here.Agent.ID} {
+		if _, ok := s.Claims.Get(id); ok {
+			t.Fatalf("%s: claims kept after the revoke cleanup", name)
+		}
 	}
 }

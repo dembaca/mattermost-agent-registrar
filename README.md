@@ -143,13 +143,21 @@ registration's, with `iat` now and `exp` one hour later (the registration's live
 `ATTESTATION_TTL`). The registrar keeps what it accepted for each bot it
 registers with an attestation key set, by either way (enrollment token or shared
 secret), in `ATTESTATION_STORE`, and signs it afresh for each read: nothing signed
-is stored, and no record outlives its bot. `/register/v1/agents/<name>` removes
-the claims with the bot; a read for a bot the registrar finds gone (removed in
-Mattermost) forgets them and answers 404. A bot disabled outside the registrar
-still has its claims until it is unregistered. Bots registered before 0.7.0 have
+is stored. `/register/v1/agents/<name>` and the enrollment cleanup remove the
+claims with the bot. A read never deletes: it answers 404 for a bot the chat
+system does not find, and keeps the record. It asks the chat system whether the
+bot exists, and remembers a positive answer for 45 s per bot id, so reads cost it
+one lookup per bot and 45 s at most.
+
+The record shows what the registrar accepted when it registered the bot, not
+the account's state in Mattermost now: a bot disabled outside the registrar
+attests until it is unregistered. With the shared secret `responsible` is the
+caller's unchecked claim; `via: secret` marks that. Bots registered before 0.7.0 have
 no record and answer 404 until they are registered again. The route has its own
 rate bucket (120 requests per minute per IP), sends `Cache-Control: no-store`, and
-exists only with an attestation key. The claims are public to anyone who knows
+exists only with an attestation key. The rate bucket counts by client address,
+taken from `X-Forwarded-For` as the other buckets do: run the registrar only
+behind a proxy that sets that header itself, or a forged one defeats it. The claims are public to anyone who knows
 the bot id (26 characters, not guessable); they are the ones the bot's description
 already shows.
 
@@ -355,7 +363,7 @@ mandate; anyone who knows a channel id can read it.
 ### Version
 
 `GET /register/v1/version` (public, no auth, same rate limit as the keys) returns
-the deployed registrar version as `{"version":"0.6.0"}`. `/healthz` stays `ok`.
+the deployed registrar version as `{"version":"0.7.0"}`. `/healthz` stays `ok`.
 
 ## Environment
 

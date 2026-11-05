@@ -59,6 +59,8 @@ type Policy struct {
 // Service runs the protocol: registration (shared secret or enrollment
 // token), unregistration, the token command and the ask mode per channel.
 type Service struct {
+	existsMu sync.Mutex
+	exists   map[string]time.Time // bot id -> until when it counts as found (claims.go)
 	Provider ProviderPort
 	Store    *Store // nil: enrollment tokens are off
 	Policy   Policy
@@ -302,7 +304,6 @@ func (s *Service) attest(c AttestClaims) (string, error) {
 }
 
 func (s *Service) undo(ctx context.Context, a Agent) {
-	s.forget(a)
 	if err := s.Provider.RevokeAgent(ctx, a); err != nil {
 		s.Log.Error("undo registration", "err", err, "user_id", a.ID)
 	}
@@ -388,6 +389,11 @@ func (s *Service) unregisterEnrolled(ctx context.Context, rec AgentRecord) (remo
 		if agent != nil {
 			s.Log.Warn("enrolled username now belongs to another account; forgetting the record only",
 				"username", rec.Username, "recorded_id", rec.UserID, "found_id", agent.ID)
+		}
+		if s.Claims != nil {
+			if err := s.Claims.Remove(rec.UserID); err != nil {
+				s.Log.Warn("forget claims", "err", err, "username", rec.Username)
+			}
 		}
 		return false, s.Store.RemoveAgent(rec.Username)
 	}

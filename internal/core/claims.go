@@ -178,10 +178,44 @@ func (s *Service) remember(c AttestClaims) {
 	}
 }
 
+// existsTTL is how long a bot found by the provider counts as still there: a
+// read of its attestation costs the provider one lookup at most this often.
+const existsTTL = 45 * time.Second
+
+// botExists says nil when the provider finds the recorded bot (the same id under
+// the recorded username), ErrNoAttestation when it does not, ErrUpstream when it
+// cannot tell. A read never deletes anything: an answer that is no more than
+// a 404 from the provider's side (a proxy, maintenance, a wrong URL) must not
+// lose the claims; Unregister and the enrollment cleanup remove them. Only a
+// positive answer is kept, per bot id.
+func (s *Service) botExists(ctx context.Context, rec ClaimRecord) error {
+	now := s.now()
+	s.existsMu.Lock()
+	until, hit := s.exists[rec.BotID]
+	s.existsMu.Unlock()
+	if hit && now.Before(until) {
+		return nil
+	}
+	agent, err := s.Provider.FindAgent(ctx, rec.Username)
+	if err != nil {
+		return fmt.Errorf("%w: lookup: %v", ErrUpstream, err)
+	}
+	if agent == nil || agent.ID != rec.BotID {
+		return ErrNoAttestation
+	}
+	s.existsMu.Lock()
+	if s.exists == nil || len(s.exists) > 4096 {
+		s.exists = map[string]time.Time{}
+	}
+	s.exists[rec.BotID] = now.Add(existsTTL)
+	s.existsMu.Unlock()
+	return nil
+}
+
 // AttestationRecord returns the signed attestation of a bot, signed now with
 // a short expiry. ErrBadRequest for an invalid bot id, ErrNoAttestation when
-// none is recorded, the bot is gone, or attestations are off; ErrUpstream when
-// the provider cannot say whether the bot still exists.
+// none is recorded, the provider does not find the bot, or attestations are off;
+// ErrUpstream when the provider cannot say whether the bot still exists.
 func (s *Service) AttestationRecord(ctx context.Context, botID string) (string, error) {
 	if !botIDRE.MatchString(botID) {
 		return "", fmt.Errorf("%w: invalid bot id", ErrBadRequest)
@@ -193,16 +227,8 @@ func (s *Service) AttestationRecord(ctx context.Context, botID string) (string, 
 	if !ok {
 		return "", ErrNoAttestation
 	}
-	agent, err := s.Provider.FindAgent(ctx, rec.Username)
-	if err != nil {
-		return "", fmt.Errorf("%w: lookup: %v", ErrUpstream, err)
-	}
-	if agent == nil || agent.ID != rec.BotID {
-		// Removed outside the registrar: no claim outlives its bot.
-		if err := s.Claims.Remove(botID); err != nil {
-			s.Log.Warn("forget claims", "err", err, "username", rec.Username)
-		}
-		return "", ErrNoAttestation
+	if err := s.botExists(ctx, rec); err != nil {
+		return "", err
 	}
 	return s.Attestor.SignFor(AttestClaims{BotID: rec.BotID, Username: rec.Username,
 		Responsible: rec.Responsible, Trusted: rec.Trusted, TrustedCut: rec.TrustedCut,

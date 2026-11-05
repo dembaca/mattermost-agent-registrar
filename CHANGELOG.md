@@ -13,8 +13,9 @@
 - The registrar now keeps the claims of every bot it registers (enrollment token
   and shared secret alike) in `ATTESTATION_STORE` (default
   `/data/attestations.json`, mode 0600, atomic), and removes them with the bot
-  (`DELETE /register/v1/agents/<name>`, a failed registration, or a read that
-  finds the bot gone). Bots registered before this version have no record and
+  (`DELETE /register/v1/agents/<name>` and the enrollment cleanup); a read never
+  deletes. It checks that the bot exists, remembering a positive answer for 45 s
+  per bot id. Bots registered before this version have no record and
   answer 404 until they are registered again. Mount `/data` as before.
 - No change to the registration answer, the keys, the modes or the mandates.
 

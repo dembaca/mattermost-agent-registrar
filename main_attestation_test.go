@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -86,5 +88,29 @@ func TestAttestationRouteFollowsTheKeyAndHasItsOwnRateBucket(t *testing.T) {
 	}
 	if rr := getMandate(h, modeChan); rr.Code == http.StatusTooManyRequests {
 		t.Fatal("the mandate bucket is shared")
+	}
+}
+
+// failingFind is a provider that cannot tell whether a bot exists.
+type failingFind struct{ core.ProviderPort }
+
+func (failingFind) FindAgent(context.Context, string) (*core.Agent, error) {
+	return nil, errors.New("mattermost is down")
+}
+
+func TestAttestationLookupFailureIsNoNotFound(t *testing.T) {
+	a, _ := testAttestor(t)
+	s := newMandateServer(t, a, nil, nil)
+	h := s.routes()
+	rr := post(h, "/register/v1/agents", "secret", `{"name":"att-2"}`)
+	var reg registerResp
+	if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &reg) != nil {
+		t.Fatalf("register: %d %s", rr.Code, rr.Body.String())
+	}
+	s.svc.Provider = failingFind{s.svc.Provider}
+	got := getAttestation(h, reg.UserID)
+	if got.Code != http.StatusBadGateway || strings.Contains(got.Body.String(), "no attestation") ||
+		strings.Contains(got.Body.String(), "mattermost is down") {
+		t.Fatalf("lookup failure: %d %s", got.Code, got.Body.String())
 	}
 }
