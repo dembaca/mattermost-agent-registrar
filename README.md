@@ -155,10 +155,9 @@ attests until it is unregistered. With the shared secret `responsible` is the
 caller's unchecked claim; `via: secret` marks that. Bots registered before 0.7.0 have
 no record and answer 404 until they are registered again. The route has its own
 rate bucket (120 requests per minute per IP), sends `Cache-Control: no-store`, and
-exists only with an attestation key. The rate bucket counts by client address,
-taken from `X-Forwarded-For` as the other buckets do: run the registrar only
-behind a proxy that sets that header itself, or a forged one defeats it. The claims are public to anyone who knows
-the bot id (26 characters, not guessable); they are the ones the bot's description
+exists only with an attestation key. The rate bucket counts by client address
+like the other buckets ([Behind a proxy](#behind-a-proxy)). The claims are
+public to anyone who knows the bot id (26 characters, not guessable); they are the ones the bot's description
 already shows.
 
 The token is a compact JWS (RFC 7515, base64url without padding), signed with
@@ -489,7 +488,12 @@ The registrar therefore takes the entry `TRUSTED_PROXY_HOPS` places from the
 right: `1` for one proxy (the default, e.g. the Cilium gateway), `2` for two in a
 row. Without the header, or with fewer entries than hops, the connection's own
 address counts; with `0` the header is ignored. Set it to the real number of
-proxies: too high lets a client pick its bucket, too low counts the proxy.
+proxies: too high lets a client pick its bucket, too low counts the proxy. The
+proxy must append its peer (Envoy: `use_remote_address: true`, `skip_xff_append:
+false`); one in transparent mode passes the client's header through and counts as
+`0`. Exposed directly, without a proxy, set `0`: the default `1` would trust the
+client's own last entry. The chosen entry must be an IP, or the peer address
+counts.
 
 ## Threat model
 

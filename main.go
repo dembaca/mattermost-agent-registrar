@@ -96,7 +96,8 @@ func main() {
 			"mode_command", s.modePort != nil, "mandate_command", s.mandatePort != nil)
 	}
 	log.Info("listening", "version", version, "addr", cfg.listenAddr, "mattermost", cfg.mm.URL,
-		"shared_secret", cfg.policy.SharedSecret != "", "enrollment", s.svc.Store != nil)
+		"shared_secret", cfg.policy.SharedSecret != "", "enrollment", s.svc.Store != nil,
+		"trusted_proxy_hops", cfg.trustedProxyHops)
 	if s.svc.Store != nil {
 		s.svc.PruneTokens()
 		go func() {
@@ -632,8 +633,9 @@ func (s *server) clientIP(r *http.Request) string {
 			entries = append(entries, strings.Split(h, ",")...)
 		}
 		if len(entries) >= n {
-			if ip := strings.TrimSpace(entries[len(entries)-n]); ip != "" {
-				return ip
+			// Only an IP is a bucket key: junk (a port, text) falls back to the peer.
+			if ip := net.ParseIP(strings.TrimSpace(entries[len(entries)-n])); ip != nil {
+				return ip.String()
 			}
 		}
 	}

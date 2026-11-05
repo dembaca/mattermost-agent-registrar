@@ -773,6 +773,11 @@ func TestClientIPCountsTrustedHopsFromTheRight(t *testing.T) {
 		{"too few entries", 2, []string{"203.0.113.9"}, "192.0.2.1"},
 		{"no header", 1, nil, "192.0.2.1"},
 		{"zero hops ignores the header", 0, []string{"203.0.113.9"}, "192.0.2.1"},
+		{"trailing empty entry", 1, []string{"203.0.113.9,"}, "192.0.2.1"},
+		{"whitespace-only entry", 1, []string{"203.0.113.9, "}, "192.0.2.1"},
+		{"entry that is not an IP", 1, []string{"203.0.113.9, evil"}, "192.0.2.1"},
+		{"entry with a port", 1, []string{"203.0.113.9:80"}, "192.0.2.1"},
+		{"repeated lines, too few entries", 3, []string{"6.6.6.6", "203.0.113.9"}, "192.0.2.1"},
 		{"repeated header lines are joined", 1, []string{"6.6.6.6", "203.0.113.9"}, "203.0.113.9"},
 	}
 	for _, c := range cases {
@@ -803,6 +808,9 @@ func TestLoadConfigTrustedProxyHops(t *testing.T) {
 		if cfg, err := load(v); err != nil || cfg.trustedProxyHops != want {
 			t.Errorf("%q: got %d, %v", v, cfg.trustedProxyHops, err)
 		}
+	}
+	if _, err := load("-1"); err == nil {
+		t.Error("negative must fail")
 	}
 	if _, err := load("x"); err == nil {
 		t.Error("not a number must fail")
