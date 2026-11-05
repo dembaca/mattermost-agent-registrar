@@ -16,6 +16,8 @@
   (default `/data/mandates.json`). `/healthz`-style startup log reports
   `mandate_command` next to `mode_command`.
 - The mode command and its record are unchanged.
+- The home named in `/agent-mandate` must be a channel the human is a member of: the
+  home's id goes into the public record, so a private channel's id is not handed out.
 
 ## 0.5.2
 

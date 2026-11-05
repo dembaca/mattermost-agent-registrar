@@ -318,6 +318,14 @@ func (s *Service) MandateCommand(ctx context.Context, inv Invocation) string {
 		s.Log.Error("resolve mandate home", "err", err, "home", req.home, "team_id", inv.TeamID)
 		return "Resolving ~" + req.home + " failed; try again."
 	}
+	// The home's id goes into a public record: only a channel the human is a
+	// member of can be named, so a private channel's id is not handed out.
+	if in, err := s.Provider.HumanInChannel(ctx, inv.Human, homeID); err != nil {
+		s.Log.Error("home membership check", "err", err, "home", req.home, "channel_id", homeID)
+		return "Checking ~" + req.home + " failed; try again."
+	} else if !in {
+		return "You are not a member of ~" + req.home + "; a mandate can only name a channel you are in."
+	}
 	m := ChannelMandate{ChannelID: inv.ChannelID, CrownOf: homeID, Home: req.home, SetBy: inv.Human.Handle,
 		SetByID: inv.Human.ID, SetAt: s.now(), Until: req.until, Note: req.note}
 	if err := s.Mandates.Set(m); err != nil {

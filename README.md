@@ -272,7 +272,9 @@ the bus reads it from there.
 `:crown:` works for 👑, `of` and `until` in any case, the `~` is optional.
 `~<home>` is a channel **name**, resolved to its id in the team the command was
 typed in; an unknown name is answered with `Channel ~x does not exist.` and
-nothing is stored. `until` is a calendar date, today or later and at most 30
+nothing is stored. Only a channel the human is a member of can be named
+(`You are not a member of ~x.`): the home's id goes into the public record, and a
+private channel's id is not handed out. `until` is a calendar date, today or later and at most 30
 days ahead; without it nothing is claimed (the bus applies its own default of 7
 days). Everything after the optional date is a free-text note: one line, at
 most 200 characters, longer is refused. Every answer is private to the caller.

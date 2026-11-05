@@ -22,8 +22,9 @@ const mandateHome = "h0000000000000000000000000" // the channel ~home in team-m
 func newMandateServer(t *testing.T, att *core.Attestor, mandateTokens, modeTokens []string) *server {
 	t.Helper()
 	mm := newFakeMM()
-	mm.chanTypes = map[string]string{modeChan: "O", modeDM: "D"}
-	mm.chanMembers = map[string]bool{modeChan + "/u-alice": true, modeDM + "/u-alice": true}
+	mm.chanTypes = map[string]string{modeChan: "O", modeDM: "D", mandateHome: "O"}
+	mm.chanMembers = map[string]bool{modeChan + "/u-alice": true, modeDM + "/u-alice": true,
+		mandateHome + "/u-alice": true}
 	mm.chanNames = map[string]string{"home": mandateHome}
 	ts := mm.server(t)
 	cfg := config{

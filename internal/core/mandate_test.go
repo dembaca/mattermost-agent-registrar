@@ -210,6 +210,13 @@ func TestMandateCommand(t *testing.T) {
 		t.Fatalf("no team: %q", got)
 	}
 
+	// The home must be one the human is a member of: a private channel's id is
+	// not published for a stranger.
+	run(hBob, chanTeam, "👑 of ~proj-home", "not a member of ~proj-home")
+	if m, _ := s.Mandates.Get(chanTeam); m.SetBy != "alice" {
+		t.Fatalf("a refused naming changed the mandate: %+v", m)
+	}
+
 	// Only team channels, only members.
 	run(hAlice, chanDM, "👑 of ~proj-home", "not in direct or group messages")
 	run(hAlice, chanGroup, "status", "not in direct or group messages")
