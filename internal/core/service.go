@@ -26,6 +26,8 @@ var (
 	ErrNoMode = errors.New("no mode set")
 	// ErrNoMandate: no mandate is set for the channel.
 	ErrNoMandate = errors.New("no mandate set")
+	// ErrNoDebug: no debug setting holds for the channel (none, or ended).
+	ErrNoDebug = errors.New("no debug set")
 	// ErrNoAttestation: no attestation is recorded for the bot, or it is gone.
 	ErrNoAttestation = errors.New("no attestation")
 )
@@ -69,6 +71,8 @@ type Service struct {
 	Modes    *ModeStore // nil: no ask modes per channel
 	// Mandates: nil means no mandates per channel.
 	Mandates *MandateStore
+	// Debug: nil means no debug settings per channel.
+	Debug *DebugStore
 	// Claims: nil means no attestation endpoint; the claims of every bot
 	// registered while it is set are kept here.
 	Claims *ClaimStore

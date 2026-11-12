@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.0
+
+- **`/agent-debug`** (ADR-010 phase 1 of the agent bus): a member of a team
+  channel switches which categories of MCP debug the agents' servers show in
+  that home: `on <category…>` adds, `off <category…>` removes, `off` turns all
+  off, `full` turns all on, `set <category…>` replaces, `status` (or no argument)
+  shows them and their end. Categories `wake`, `identity`, `sig`, `asks`,
+  `calls`, `props` (`full` for all); an unknown word is refused. Each command
+  sets one new end for the whole setting: an hour, or `for <duration>`, at least
+  1 minute, at most 24 h. The registrar builds each setting from the previous
+  one's categories and the command; an ended setting counts as off.
+- **`GET /register/v1/debug/{channel_id}`** (public, own rate bucket of 120 per
+  minute per IP, `Cache-Control: no-store`) returns the setting as a signed
+  record, header typ `mm-agent-debug+jwt`, claims `channel_id`, `categories`,
+  `set_by`, `set_by_id`, `set_at_ms`, `until_ms`, `iat`, `exp` (1 h, signed fresh
+  per read, the signature's freshness only). `404` with `{"error":"no debug set"}`
+  when none holds: never set, turned off, or ended.
+- New env: `DEBUG_COMMAND_TOKEN` (needs the attestation key), `DEBUG_STORE`
+  (default `/data/debug.json`, 0600, atomic; ended settings pruned at start and
+  hourly). The startup log reports `debug_command`.
+- No change to the ask mode, the mandates or the attestations.
+
 ## 0.7.2
 
 - **The rate limiter forgets quiet addresses.** It kept every client address it
