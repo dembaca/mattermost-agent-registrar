@@ -355,6 +355,79 @@ The bus accepts a record only with the registrar's keys pinned and only when
 `set_by` is a human the agent's session trusts. The record names who set the
 mandate; anyone who knows a channel id can read it.
 
+### MCP debug per home: `/agent-debug`
+
+A trusted human switches, per home channel, which of its own decisions each
+agent's MCP server shows in that home, and until when (ADR-010 of the agent bus,
+phase 1: the command and the record; the bus side reads them). The registrar
+keeps one setting per channel, builds each new one from the previous setting's
+categories and the command, and publishes it as a signed record.
+
+| Command | Effect |
+|---------|--------|
+| `/agent-debug on <category…> [for <duration>]` | add categories |
+| `/agent-debug off <category…> [for <duration>]` | remove categories |
+| `/agent-debug off` | turn all off |
+| `/agent-debug full [for <duration>]` | turn all on |
+| `/agent-debug set <category…> [for <duration>]` | replace the categories |
+| `/agent-debug` or `/agent-debug status` | show the categories and when they end |
+
+Categories: `wake`, `identity`, `sig`, `asks`, `calls`, `props`; `full` stands
+for all six, as a command word and as a category (`on full`, `off full`). Words
+in any case, categories in any order and repeated at will. An unknown word is
+refused with the list of known ones, and nothing changes.
+
+**One end for the whole setting.** Every command that leaves categories on sets
+a new end: an hour from now, or what `for <duration>` names (`30m`, `2h`,
+`1h30m`, `1d`; at least 1 minute, at most 24 hours, beyond is refused, not
+cut). `for` comes last. `off <category…>` sets a new end for what stays on; when
+nothing stays on (`off`, `off full`, or removing the last one) the setting is
+gone. A setting whose end has passed counts as off: the next command starts from
+no categories, not from the ended ones. Ended settings are dropped from the
+store at start and then hourly, with the token pruning.
+
+Every answer is private to the caller. The channel is the one the command is
+typed in; direct and group messages are refused, and only members of the
+channel (active, no bots, no guests) can read or switch its setting, as for
+the ask mode and the mandate. Which members count is the bus's to decide: a
+server counts a record only when `set_by_id` is one of its session's trusted
+humans, and the record names whoever gave the last command. Each change is
+logged with the caller's handle, the channel id, the categories and the end.
+
+`GET /register/v1/debug/{channel_id}` (public, no auth) returns the current
+setting as a record signed for this request:
+
+| Status | Body |
+|--------|------|
+| `200` | `{"record":"<jws>"}` |
+| `404` | `{"error":"no debug set"}`: none set, turned off, or its end has passed |
+| `400` | `{"error":"invalid channel id"}`: not 26 characters of `[a-z0-9]` |
+
+It has its own rate bucket (120 requests per minute per IP) and sends
+`Cache-Control: no-store`. The route exists only with an attestation key;
+without `DEBUG_COMMAND_TOKEN` it still publishes the settings made earlier
+until they end.
+
+The record is a compact JWS signed with the attestation key (same `kid` as in
+`GET /register/v1/keys`). The header is exactly
+`{"alg":"EdDSA","typ":"mm-agent-debug+jwt","kid":"<kid>"}`: its own `typ`, so
+it never passes as another record. The payload is compact JSON with these
+claims, in this order:
+
+| Claim | Meaning |
+|-------|---------|
+| `channel_id` | the channel the command was typed in |
+| `categories` | the categories that are on: a non-empty list, in the order `wake`, `identity`, `sig`, `asks`, `calls`, `props`; never `full` |
+| `set_by` | username of whoever gave the last command, lower case, without `@` |
+| `set_by_id` | their Mattermost user id |
+| `set_at_ms` | when the last command was given, unix **milliseconds** |
+| `until_ms` | when the setting ends, unix **milliseconds** |
+| `iat`, `exp` | unix seconds; signed fresh for each request, `exp` is `iat` + 1 h: the signature's freshness, not the setting's end |
+
+The bus accepts a record only with the registrar's keys pinned. The record is
+public: anyone who knows a channel id can read which categories are on and who
+switched them.
+
 ### Health
 
 `GET /healthz` → `ok`
@@ -362,7 +435,7 @@ mandate; anyone who knows a channel id can read it.
 ### Version
 
 `GET /register/v1/version` (public, no auth, same rate limit as the keys) returns
-the deployed registrar version as `{"version":"0.7.2"}`. `/healthz` stays `ok`.
+the deployed registrar version as `{"version":"0.8.0"}`. `/healthz` stays `ok`.
 
 ## Environment
 
@@ -388,8 +461,10 @@ the deployed registrar version as `{"version":"0.7.2"}`. `/healthz` stays `ok`.
 | `ATTESTATION_TTL` | no | Default `30d`. Lifetime of an attestation (`d`, `w`, or Go durations like `12h`) |
 | `MODE_COMMAND_TOKEN` | no | Verification token of the `/agent-ask-mode` slash command; comma-separated for one command per team. Enables `POST /register/v1/mode`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of `SLASH_COMMAND_TOKEN` and `ENROLLMENT_PEPPER` |
 | `MANDATE_COMMAND_TOKEN` | no | Verification token of the `/agent-mandate` slash command; comma-separated for one command per team. Enables `POST /register/v1/mandate`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of the other command tokens |
+| `DEBUG_COMMAND_TOKEN` | no | Verification token of the `/agent-debug` slash command; comma-separated for one command per team. Enables `POST /register/v1/debug`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of the other command tokens |
 | `ATTESTATION_STORE` | no | Default `/data/attestations.json`. The claims of each bot, by bot id, behind `GET /register/v1/attestations/{bot_id}`; its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `MANDATE_STORE` | no | Default `/data/mandates.json`. The mandate per channel, its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
+| `DEBUG_STORE` | no | Default `/data/debug.json`. The debug setting per channel, its own file (mode 0600, written atomically); ended settings are pruned at start and hourly. Read whenever an attestation key is set |
 | `MODE_STORE` | no | Default `/data/modes.json`. The mode per channel, its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `BOT_USERNAME_PREFIX` | no | Default `agent-` |
 | `DEFAULT_TEAM_NAME` | no | Default `ai-agents`. Team new bots join, and the team `--channels` names are looked up in; it must exist |
@@ -463,6 +538,19 @@ first, and use the same names as `MM_TEAM` and `MM_CHANNEL` in the bus plugin.
 5. Agents fetch `GET <registrar>/register/v1/mandates/{channel_id}` and verify the
    record as described [above](#mandate-per-channel-agent-mandate).
 
+## Setup for `/agent-debug`
+
+1. **Configure an attestation key** (as for the ask mode); pin its public key in the bus.
+2. **Create the slash command.** *Integrations → Slash Commands → Add* in the
+   team(s) whose channels get debug: trigger word `agent-debug`, request URL
+   `https://<registrar>/register/v1/debug`, method `POST`, autocomplete on with
+   the hint `on|off|set <category…> [for <duration>] | full | off | status`.
+3. **Copy the command's token into `DEBUG_COMMAND_TOKEN`** (comma-separate the
+   tokens of several teams). Its own token: no other command's token verifies it.
+4. **Mount a volume for `DEBUG_STORE`** (the default `/data/debug.json`).
+5. Agents fetch `GET <registrar>/register/v1/debug/{channel_id}` and verify the
+   record as described [above](#mcp-debug-per-home-agent-debug).
+
 ## Migration from the shared secret
 
 0.2.0 changes what a shared-secret registration writes: the bot is now
@@ -481,7 +569,7 @@ has no owner split. To keep owner-bound bots:
 
 ## Behind a proxy
 
-The rate buckets (registration, modes, mandates, attestations) count clients by
+The rate buckets (registration, modes, mandates, debug, attestations) count clients by
 IP. A proxy appends the address it saw to `X-Forwarded-For` and keeps what the
 client already put there, so the first entry is the client's claim, not a fact.
 The registrar therefore takes the entry `TRUSTED_PROXY_HOPS` places from the
@@ -566,6 +654,7 @@ docker run --rm -p 8080:8080 \
   -e ATTESTATION_KEY_FILE=/run/secrets/attestation-key \
   -e MODE_COMMAND_TOKEN=... \
   -e MANDATE_COMMAND_TOKEN=... \
+  -e DEBUG_COMMAND_TOKEN=... \
   ghcr.io/dembaca/mattermost-agent-registrar:0.5.1
 ```
 
@@ -580,7 +669,7 @@ the token store is a local file.
 - `main.go`: configuration from the environment, HTTP handlers, rate limit.
 - `internal/core`: the provider-neutral protocol: enrollment tokens and their
   store, scope and policy, the bot description, the `/agent-token` command, the
-  owner attestation (with the per-bot claims it serves) and the `/agent-ask-mode` command with its store and record. It
+  owner attestation (with the per-bot claims it serves) and the `/agent-ask-mode`, `/agent-mandate` and `/agent-debug` commands with their stores and records. It
   talks to the chat system only through `core.ProviderPort` and imports no
   provider (a test checks this).
 - `internal/mattermost`: the Mattermost adapter implementing `ProviderPort`

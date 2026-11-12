@@ -19,7 +19,7 @@ import (
 )
 
 // version is the release; CHANGELOG.md and the image tag in CI follow it.
-const version = "0.7.2"
+const version = "0.8.0"
 
 // pruneEvery is how often the token store is pruned while running.
 const pruneEvery = time.Hour
@@ -33,6 +33,8 @@ type config struct {
 	modeRateLimitPerMin int
 	// mandateRateLimitPerMin is the own bucket of GET /register/v1/mandates/….
 	mandateRateLimitPerMin int
+	// debugRateLimitPerMin is the own bucket of GET /register/v1/debug/….
+	debugRateLimitPerMin int
 	// attestationRateLimitPerMin is the own bucket of GET /register/v1/attestations/….
 	attestationRateLimitPerMin int
 	// trustedProxyHops is how many proxies in front of the registrar append to
@@ -46,6 +48,8 @@ type config struct {
 	modeStore        string
 	mandateTokens    []string // verification tokens of the mandate command; none: no command
 	mandateStore     string
+	debugTokens      []string // verification tokens of the debug command; none: no command
+	debugStore       string
 	mm               mattermost.Config
 	policy           core.Policy
 	attestor         *core.Attestor // nil: no attestation, no mode records
@@ -60,8 +64,11 @@ type server struct {
 	rate     *limiter
 	modeRate *limiter
 	// mandatePort verifies the mandate command's tokens; nil without them.
-	mandatePort     core.ProviderPort
-	mandateRate     *limiter
+	mandatePort core.ProviderPort
+	mandateRate *limiter
+	// debugPort verifies the debug command's tokens; nil without them.
+	debugPort       core.ProviderPort
+	debugRate       *limiter
 	attestationRate *limiter
 }
 
@@ -95,16 +102,18 @@ func main() {
 	}
 	if cfg.attestor != nil {
 		log.Info("attestation on", "kid", cfg.attestor.Kid(), "ttl", cfg.attestor.TTL.String(),
-			"mode_command", s.modePort != nil, "mandate_command", s.mandatePort != nil)
+			"mode_command", s.modePort != nil, "mandate_command", s.mandatePort != nil, "debug_command", s.debugPort != nil)
 	}
 	log.Info("listening", "version", version, "addr", cfg.listenAddr, "mattermost", cfg.mm.URL,
 		"shared_secret", cfg.policy.SharedSecret != "", "enrollment", s.svc.Store != nil,
 		"trusted_proxy_hops", cfg.trustedProxyHops)
-	if s.svc.Store != nil {
+	if s.svc.Store != nil || s.svc.Debug != nil {
 		s.svc.PruneTokens()
+		s.svc.PruneDebug()
 		go func() {
 			for range time.Tick(pruneEvery) {
 				s.svc.PruneTokens()
+				s.svc.PruneDebug()
 			}
 		}()
 	}
@@ -156,6 +165,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		rateLimitPerMin:            30,
 		modeRateLimitPerMin:        120,
 		mandateRateLimitPerMin:     120,
+		debugRateLimitPerMin:       120,
 		attestationRateLimitPerMin: 120,
 		trustedProxyHops:           num("TRUSTED_PROXY_HOPS", 0),
 		attestationStore:           env("ATTESTATION_STORE", "/data/attestations.json"),
@@ -165,6 +175,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		modeStore:                  env("MODE_STORE", "/data/modes.json"),
 		mandateTokens:              splitList(env("MANDATE_COMMAND_TOKEN", "")),
 		mandateStore:               env("MANDATE_STORE", "/data/mandates.json"),
+		debugTokens:                splitList(env("DEBUG_COMMAND_TOKEN", "")),
+		debugStore:                 env("DEBUG_STORE", "/data/debug.json"),
 		mm: mattermost.Config{
 			URL:              strings.TrimRight(need("MATTERMOST_URL"), "/"),
 			Token:            need("MATTERMOST_TOKEN"),
@@ -206,6 +218,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if len(cfg.mandateTokens) > 0 && env("ATTESTATION_KEY", "") == "" && env("ATTESTATION_KEY_FILE", "") == "" {
 		errs = append(errs, errors.New("MANDATE_COMMAND_TOKEN needs ATTESTATION_KEY or ATTESTATION_KEY_FILE: mandate records are signed"))
+	}
+	if len(cfg.debugTokens) > 0 && env("ATTESTATION_KEY", "") == "" && env("ATTESTATION_KEY_FILE", "") == "" {
+		errs = append(errs, errors.New("DEBUG_COMMAND_TOKEN needs ATTESTATION_KEY or ATTESTATION_KEY_FILE: debug records are signed"))
 	}
 	enroll := len(cfg.mm.CommandTokens) > 0
 	switch {
@@ -271,6 +286,7 @@ func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, erro
 	s := &server{cfg: cfg, svc: svc, port: port, log: log,
 		rate: newLimiter(cfg.rateLimitPerMin), modeRate: newLimiter(cfg.modeRateLimitPerMin),
 		mandateRate:     newLimiter(cfg.mandateRateLimitPerMin),
+		debugRate:       newLimiter(cfg.debugRateLimitPerMin),
 		attestationRate: newLimiter(cfg.attestationRateLimitPerMin)}
 	if cfg.attestor != nil {
 		// The store is read for GET /register/v1/modes/… even without the
@@ -303,6 +319,17 @@ func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, erro
 			mcfg.CommandTokens = cfg.mandateTokens
 			s.mandatePort = &mattermost.Adapter{Cfg: mcfg, Client: client, Log: log}
 		}
+		// Likewise for GET /register/v1/debug/….
+		ds, err := core.OpenDebugStore(cfg.debugStore)
+		if err != nil {
+			return nil, err
+		}
+		svc.Debug = ds
+		if len(cfg.debugTokens) > 0 {
+			mcfg := cfg.mm
+			mcfg.CommandTokens = cfg.debugTokens
+			s.debugPort = &mattermost.Adapter{Cfg: mcfg, Client: client, Log: log}
+		}
 	}
 	return s, nil
 }
@@ -328,6 +355,12 @@ func (s *server) routes() http.Handler {
 	}
 	if s.mandatePort != nil {
 		mux.HandleFunc("POST /register/v1/mandate", s.handleMandateCommand)
+	}
+	if s.svc.Debug != nil {
+		mux.HandleFunc("GET /register/v1/debug/{channel_id}", s.handleDebug)
+	}
+	if s.debugPort != nil {
+		mux.HandleFunc("POST /register/v1/debug", s.handleDebugCommand)
 	}
 	if s.svc.Claims != nil {
 		mux.HandleFunc("GET /register/v1/attestations/{bot_id}", s.handleAttestation)
@@ -557,6 +590,54 @@ func (s *server) handleMandate(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no mandate set"})
 	case err != nil:
 		s.log.Error("sign mandate record", "err", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
+	default:
+		_ = json.NewEncoder(w).Encode(map[string]string{"record": rec})
+	}
+}
+
+// handleDebugCommand serves the debug command (/agent-debug or whatever
+// trigger the operator chose), verified with DEBUG_COMMAND_TOKEN. Every answer
+// is private to the caller.
+func (s *server) handleDebugCommand(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if !s.allowRate(s.clientIP(r)) {
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
+	inv, err := s.debugPort.VerifyInvocation(r)
+	if err != nil {
+		if errors.Is(err, core.ErrForbidden) {
+			s.debugPort.ReplyPrivate(w, inv, strings.TrimPrefix(err.Error(), core.ErrForbidden.Error()+": "))
+			return
+		}
+		s.fail(w, err)
+		return
+	}
+	s.debugPort.ReplyPrivate(w, inv, s.svc.DebugCommand(r.Context(), inv))
+}
+
+// handleDebug publishes a channel's debug setting as a signed record, signed
+// fresh for each request. Public like the modes and mandates; its own rate
+// bucket. 404 with "no debug set" while none holds, also once it has ended.
+func (s *server) handleDebug(w http.ResponseWriter, r *http.Request) {
+	if !s.debugRate.allow(s.clientIP(r)) {
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
+	rec, err := s.svc.DebugRecord(r.PathValue("channel_id"))
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	switch {
+	case errors.Is(err, core.ErrBadRequest):
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid channel id"})
+	case errors.Is(err, core.ErrNoDebug):
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no debug set"})
+	case err != nil:
+		s.log.Error("sign debug record", "err", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
 	default:
