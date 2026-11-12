@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -93,14 +94,14 @@ func TestParseDebug(t *testing.T) {
 		// Canonical order, duplicates folded, any case.
 		{"On PROPS wake props", debugRequest{action: "on", categories: []string{"wake", "props"}, dur: DebugDefault}},
 		{"off sig asks", debugRequest{action: "off", categories: []string{"sig", "asks"}, dur: DebugDefault}},
-		{"set calls for 2h", debugRequest{action: "set", categories: []string{"calls"}, dur: 2 * time.Hour}},
-		{"set identity for 1h30m", debugRequest{action: "set", categories: []string{"identity"}, dur: 90 * time.Minute}},
+		{"set calls for 2h", debugRequest{action: "set", categories: []string{"calls"}, dur: 2 * time.Hour, timed: true}},
+		{"set identity for 1h30m", debugRequest{action: "set", categories: []string{"identity"}, dur: 90 * time.Minute, timed: true}},
 		{"on full", debugRequest{action: "on", categories: all, dur: DebugDefault}},
 		{"full", debugRequest{action: "full", categories: all, dur: DebugDefault}},
-		{"full for 24h", debugRequest{action: "full", categories: all, dur: 24 * time.Hour}},
-		{"full for 1d", debugRequest{action: "full", categories: all, dur: 24 * time.Hour}},
-		{"on wake for 1m", debugRequest{action: "on", categories: []string{"wake"}, dur: time.Minute}},
-		{"off wake for 30m", debugRequest{action: "off", categories: []string{"wake"}, dur: 30 * time.Minute}},
+		{"full for 24h", debugRequest{action: "full", categories: all, dur: 24 * time.Hour, timed: true}},
+		{"full for 1d", debugRequest{action: "full", categories: all, dur: 24 * time.Hour, timed: true}},
+		{"on wake for 1m", debugRequest{action: "on", categories: []string{"wake"}, dur: time.Minute, timed: true}},
+		{"off wake for 30m", debugRequest{action: "off", categories: []string{"wake"}, dur: 30 * time.Minute, timed: true}},
 	} {
 		got, refusal := parseDebug(c.in)
 		if refusal != "" || !reflect.DeepEqual(got, c.want) {
@@ -179,7 +180,7 @@ func TestDebugCommand(t *testing.T) {
 
 	// on adds, and the setting gets one new end; built from the previous record.
 	c.t = t0.Add(10 * time.Minute)
-	run(hBob, chanTeam, "on sig props", "`wake` `sig` `props`, until 2026-10-29 13:10 UTC (1h from now), set by @bob (was: `wake`, until 2026-10-29 13:00 UTC)")
+	run(hBob, chanTeam, "on sig props", "`wake` `sig` `props`, until 2026-10-29 13:10 UTC (1h from now), set by @bob (was: `wake`, until 2026-10-29 13:00 UTC (50m from now), set by @alice)")
 	state([]string{"wake", "sig", "props"}, c.t.Add(time.Hour), "bob")
 
 	// off removes only what it names, and also sets a new end (for applies).
@@ -208,6 +209,13 @@ func TestDebugCommand(t *testing.T) {
 
 	// off with every category named ends it like off alone.
 	run(hAlice, chanTeam, "off full", "Debug in this channel: off (was: `wake` `identity`")
+	// Removing the last category: the setting is gone, and a for says so.
+	run(hAlice, chanTeam, "set wake", "`wake`")
+	run(hAlice, chanTeam, "off wake for 2h", "off (was: `wake`, until 2026-10-29 13:20 UTC (1h from now), set by @alice). Nothing stays on, so the setting is gone; `for` has no effect.")
+	run(hAlice, chanTeam, "set wake", "`wake`")
+	if got := s.DebugCommand(ctx, debugInv(hAlice, chanTeam, "off wake")); !strings.HasSuffix(got, "Nothing stays on, so the setting is gone.") {
+		t.Fatalf("off last category: %q", got)
+	}
 	if _, ok := s.Debug.Get(chanTeam); ok {
 		t.Fatal("empty setting kept")
 	}
@@ -251,6 +259,25 @@ func TestDebugCommand(t *testing.T) {
 
 	s.Attestor = nil
 	run(hAlice, chanTeam, "status", "not enabled")
+}
+
+// Concurrent additive commands never lose each other's category.
+func TestDebugCommandConcurrent(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		s, _ := debugService(t, filepath.Join(t.TempDir(), "debug.json"))
+		var wg sync.WaitGroup
+		for _, cat := range DebugCategories {
+			wg.Add(1)
+			go func(cat string) {
+				defer wg.Done()
+				s.DebugCommand(context.Background(), debugInv(hAlice, chanTeam, "on "+cat))
+			}(cat)
+		}
+		wg.Wait()
+		if d, _ := s.Debug.Get(chanTeam); !reflect.DeepEqual(d.Categories, DebugCategories) {
+			t.Fatalf("round %d: %v, want %v", round, d.Categories, DebugCategories)
+		}
+	}
 }
 
 func TestDebugRecord(t *testing.T) {

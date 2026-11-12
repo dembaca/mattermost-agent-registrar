@@ -10,7 +10,11 @@
   `calls`, `props` (`full` for all); an unknown word is refused. Each command
   sets one new end for the whole setting: an hour, or `for <duration>`, at least
   1 minute, at most 24 h. The registrar builds each setting from the previous
-  one's categories and the command; an ended setting counts as off.
+  one's categories and the command, read and written under one lock, so
+  concurrent commands lose no change; an ended setting counts as off. A
+  command that replaces a running setting names its previous setter in the
+  reply; one that removes the last category says the setting is gone (and that
+  its `for` has no effect).
 - **`GET /register/v1/debug/{channel_id}`** (public, own rate bucket of 120 per
   minute per IP, `Cache-Control: no-store`) returns the setting as a signed
   record, header typ `mm-agent-debug+jwt`, claims `channel_id`, `categories`,

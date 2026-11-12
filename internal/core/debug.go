@@ -171,6 +171,35 @@ func (s *DebugStore) Delete(channelID string) error {
 	return nil
 }
 
+// Update reads a channel's setting, applies fn and saves the result, all under
+// the store's lock, so concurrent commands never lose each other's change. fn
+// gets the stored setting (ended or not) and returns the next one, or keep
+// false to remove it. Update returns the setting as it was before.
+func (s *DebugStore) Update(channelID string, fn func(cur ChannelDebug, had bool) (next ChannelDebug, keep bool)) (ChannelDebug, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, had := s.st.Debug[channelID]
+	next, keep := fn(cur, had)
+	switch {
+	case keep:
+		next.ChannelID = channelID
+		s.st.Debug[channelID] = next
+	case had:
+		delete(s.st.Debug, channelID)
+	default:
+		return cur, had, nil
+	}
+	if err := s.saveLocked(); err != nil {
+		if had {
+			s.st.Debug[channelID] = cur
+		} else {
+			delete(s.st.Debug, channelID)
+		}
+		return cur, had, err
+	}
+	return cur, had, nil
+}
+
 // Prune removes every setting that has ended at now and returns how many.
 func (s *DebugStore) Prune(now time.Time) (int, error) {
 	s.mu.Lock()
@@ -250,6 +279,7 @@ type debugRequest struct {
 	action     string   // status, on, off, set or full; "" means the usage text
 	categories []string // as given, "full" expanded, canonical order
 	dur        time.Duration
+	timed      bool // "for <duration>" was given
 }
 
 // parseDebug parses the text after the trigger. The second result is the
@@ -261,7 +291,6 @@ func parseDebug(text string) (debugRequest, string) {
 	}
 	req := debugRequest{action: words[0], dur: DebugDefault}
 	rest := words[1:]
-	hasFor := false
 	if i := slices.Index(rest, "for"); i >= 0 {
 		if i != len(rest)-2 {
 			return debugRequest{}, "`for` comes last and takes one duration, e.g. `for 2h`."
@@ -273,11 +302,11 @@ func parseDebug(text string) (debugRequest, string) {
 		if d < DebugMin || d > DebugMax {
 			return debugRequest{}, fmt.Sprintf("`for %s` is out of range: at least %s, at most %s.", rest[i+1], fmtDur(DebugMin), fmtDur(DebugMax))
 		}
-		req.dur, hasFor, rest = d, true, rest[:i]
+		req.dur, req.timed, rest = d, true, rest[:i]
 	}
 	switch req.action {
 	case "status":
-		if len(rest) > 0 || hasFor {
+		if len(rest) > 0 || req.timed {
 			return debugRequest{}, ""
 		}
 		return req, ""
@@ -294,7 +323,7 @@ func parseDebug(text string) (debugRequest, string) {
 	if len(rest) == 0 {
 		switch req.action {
 		case "off":
-			if hasFor {
+			if req.timed {
 				return debugRequest{}, "`off` alone turns everything off; `for` does not apply."
 			}
 			return req, ""
@@ -386,45 +415,58 @@ func (s *Service) DebugCommand(ctx context.Context, inv Invocation) string {
 		return msg
 	}
 	now := s.now()
-	cur, had := s.Debug.Get(inv.ChannelID)
-	active := had && cur.Active(now)
 	if req.action == "status" {
-		if !active {
+		cur, had := s.Debug.Get(inv.ChannelID)
+		if !had || !cur.Active(now) {
 			return "Debug in this channel: off."
 		}
 		return "Debug in this channel: " + describeDebug(cur, now) + "."
 	}
-	var prev []string
-	if active {
-		prev = cur.Categories
-	}
-	next := req.apply(prev)
-	if len(next) == 0 {
-		if !had {
-			return "Debug in this channel: off (it was not on)."
+	var next ChannelDebug
+	prev, had, err := s.Debug.Update(inv.ChannelID, func(cur ChannelDebug, had bool) (ChannelDebug, bool) {
+		var base []string
+		if had && cur.Active(now) {
+			base = cur.Categories
 		}
-		// An ended setting is removed as well; it was off already.
-		if err := s.Debug.Delete(inv.ChannelID); err != nil {
+		cats := req.apply(base)
+		if len(cats) == 0 {
+			// Nothing stays on: the setting is removed, an ended one as well.
+			return ChannelDebug{}, false
+		}
+		next = ChannelDebug{ChannelID: inv.ChannelID, Categories: cats, SetBy: inv.Human.Handle, SetByID: inv.Human.ID,
+			SetAt: now, Until: now.Add(req.dur)}
+		return next, true
+	})
+	active := had && prev.Active(now)
+	if len(next.Categories) == 0 {
+		if err != nil {
 			s.Log.Error("debug off", "err", err, "channel_id", inv.ChannelID)
 			return "Switching debug off failed; try again."
 		}
-		s.Log.Info("debug off", "by", inv.Human.Handle, "channel_id", inv.ChannelID)
+		if had {
+			s.Log.Info("debug off", "by", inv.Human.Handle, "channel_id", inv.ChannelID)
+		}
 		if !active {
 			return "Debug in this channel: off (it was not on)."
 		}
-		return "Debug in this channel: off (was: " + describeDebug(cur, now) + ")."
+		out := "Debug in this channel: off (was: " + describeDebug(prev, now) + ")"
+		if req.action == "off" && len(req.categories) > 0 {
+			out += ". Nothing stays on, so the setting is gone"
+			if req.timed {
+				out += "; `for` has no effect"
+			}
+		}
+		return out + "."
 	}
-	d := ChannelDebug{ChannelID: inv.ChannelID, Categories: next, SetBy: inv.Human.Handle, SetByID: inv.Human.ID,
-		SetAt: now, Until: now.Add(req.dur)}
-	if err := s.Debug.Set(d); err != nil {
+	if err != nil {
 		s.Log.Error("set debug", "err", err, "channel_id", inv.ChannelID)
 		return "Switching debug failed; try again."
 	}
 	s.Log.Info("set debug", "by", inv.Human.Handle, "channel_id", inv.ChannelID,
-		"categories", strings.Join(next, ","), "until", d.Until.UTC().Format(time.RFC3339))
-	out := "Debug in this channel: " + describeDebug(d, now)
+		"categories", strings.Join(next.Categories, ","), "until", next.Until.UTC().Format(time.RFC3339))
+	out := "Debug in this channel: " + describeDebug(next, now)
 	if active {
-		out += " (was: " + quoteCategories(cur.Categories) + ", until " + fmtModeTime(cur.Until) + ")"
+		out += " (was: " + describeDebug(prev, now) + ")"
 	}
 	return out + ". Agents here pick it up the next time they fetch it; an agent counts it only when its session trusts you."
 }
