@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.9.0
+
+- **Release record** (ADR-011 phase 3 of the agent bus): the operator names the
+  SSH keys that sign the bus's release tags and, optionally, the version hosts
+  should run; the registrar publishes both as one signed, installation-wide
+  record. Operator configuration only: no slash command, nothing per team or
+  channel. The hosts bound their trust in it: they pin the keys on first
+  contact and take an update only when it is newer, signed by a pinned key and
+  not withdrawn.
+- **`GET /register/v1/release`** (public, own rate bucket of 120 per minute per
+  IP, `Cache-Control: no-store`) returns `{"record":"<jws>"}`, header typ
+  `mm-agent-release+jwt`, claims `signers` (`"<type> <base64>"`, in config
+  order), `version` (absent when `RELEASE_VERSION` is unset), `set_at_ms` (when
+  the registrar started with this config), `iat`, `exp` (1 h, signed fresh per
+  read). `404` with `{"error":"no release set"}` when no signers are set. The
+  route exists only with an attestation key.
+- New env: `RELEASE_SIGNERS` or `RELEASE_SIGNERS_FILE` (not both): one or more
+  `ssh-ed25519` or `sk-ssh-ed25519@openssh.com` public keys, newline- or
+  comma-separated, a trailing comment dropped, `#` lines skipped; `RELEASE_VERSION`
+  (`v<x.y.z>`, needs signers). Either needs the attestation key. A bad, duplicate
+  or unreadable key, a bad version or a version without signers refuses to start.
+  The startup log reports the version and the keys' SHA256 fingerprints, no
+  other key material.
+- No change to the other records or commands.
+
 ## 0.8.0
 
 - **`/agent-debug`** (ADR-010 phase 1 of the agent bus): a member of a team

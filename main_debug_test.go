@@ -31,6 +31,7 @@ func newDebugServer(t *testing.T, att *core.Attestor, debugTokens, mandateTokens
 		mandateRateLimitPerMin:     100,
 		debugRateLimitPerMin:       100,
 		attestationRateLimitPerMin: 100,
+		releaseRateLimitPerMin:     100,
 		modeStore:                  filepath.Join(t.TempDir(), "modes.json"),
 		mandateTokens:              mandateTokens,
 		mandateStore:               filepath.Join(t.TempDir(), "mandates.json"),
