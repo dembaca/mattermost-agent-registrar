@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0
+
+- **`RELEASE_VERSION=latest`**: next to the fixed pin (`v<x.y.z>`), the literal
+  `latest` (lowercase, nothing else) is accepted. The release record's
+  `version` claim is then the string `latest`; nothing else in the record
+  changes. Hosts on bus 0.87.0 or later follow the newest tag signed with a
+  pinned key and not withdrawn, at their next session end; a fixed pin still
+  rolls out step by step. Hosts on bus 0.86.x see a claim they do not accept
+  and change nothing. Like a version, `latest` needs signers; the startup error
+  for any other value names both forms.
+
 ## 0.9.0
 
 - **Release record** (ADR-011 phase 3 of the agent bus): the operator names the

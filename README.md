@@ -461,7 +461,7 @@ compact JSON with these claims, in this order:
 | Claim | Meaning |
 |-------|---------|
 | `signers` | the release signing keys, each `"<type> <base64>"` (`ssh-ed25519` or `sk-ssh-ed25519@openssh.com`, without comment), in config order |
-| `version` | the version hosts should run, `v<x.y.z>`; absent when `RELEASE_VERSION` is unset (the record then names the keys only) |
+| `version` | the version hosts should run, `v<x.y.z>`, or the string `latest` (hosts follow the newest signed tag, see `RELEASE_VERSION`); absent when `RELEASE_VERSION` is unset (the record then names the keys only) |
 | `set_at_ms` | the registrar's start time, unix **milliseconds**: the config is read only at start, and every restart moves it, changed config or not. Do not order or key anything by it |
 | `iat`, `exp` | unix seconds; signed fresh for each request, `exp` is `iat` + 1 h |
 
@@ -475,7 +475,7 @@ At start the registrar logs the version and the keys' SHA256 fingerprints (as
 ### Version
 
 `GET /register/v1/version` (public, no auth, same rate limit as the keys) returns
-the deployed registrar version as `{"version":"0.9.0"}`. `/healthz` stays `ok`.
+the deployed registrar version as `{"version":"0.10.0"}`. `/healthz` stays `ok`.
 
 ## Environment
 
@@ -504,7 +504,7 @@ the deployed registrar version as `{"version":"0.9.0"}`. `/healthz` stays `ok`.
 | `DEBUG_COMMAND_TOKEN` | no | Verification token of the `/agent-debug` slash command; comma-separated for one command per team. Enables `POST /register/v1/debug`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of the other command tokens |
 | `RELEASE_SIGNERS` | no | The release signing keys of the [release record](#release-record): one to 16 SSH public keys, newline- or comma-separated, each `ssh-ed25519 <base64>` or `sk-ssh-ed25519@openssh.com <base64>` (strict base64); a trailing comment is dropped, lines starting with `#` are skipped. Enables the record. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`. Another key type, a malformed or repeated key, more than 16: the registrar does not start |
 | `RELEASE_SIGNERS_FILE` | no | Path to a file holding the same, one key per line as in `authorized_keys` (no commas between keys, so comments may hold commas), at most 64 KiB. Anyone who can write it plants release keys: protect it like the attestation key. Setting both this and `RELEASE_SIGNERS` is a configuration error |
-| `RELEASE_VERSION` | no | The version hosts should run, `v<x.y.z>` without leading zeros (e.g. `v0.86.0`). Needs `RELEASE_SIGNERS` or `RELEASE_SIGNERS_FILE`; without it the record names the keys only. Any other form: the registrar does not start |
+| `RELEASE_VERSION` | no | The release hosts should run: either a fixed pin, `v<x.y.z>` without leading zeros (e.g. `v0.86.0`), or exactly `latest` (lowercase). A fixed pin rolls out step by step: you raise it, hosts move to it. `latest` makes hosts follow every newly signed tag at their next session end (the newest tag signed with a pinned key and not withdrawn); hosts need bus 0.87.0 or later for it, older ones log a record they cannot read and keep their version. Either form needs `RELEASE_SIGNERS` or `RELEASE_SIGNERS_FILE`; without it the record names the keys only. Any other form: the registrar does not start |
 | `ATTESTATION_STORE` | no | Default `/data/attestations.json`. The claims of each bot, by bot id, behind `GET /register/v1/attestations/{bot_id}`; its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `MANDATE_STORE` | no | Default `/data/mandates.json`. The mandate per channel, its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `DEBUG_STORE` | no | Default `/data/debug.json`. The debug setting per channel, its own file (mode 0600, written atomically); ended settings are pruned at start and hourly. Read whenever an attestation key is set |
@@ -712,7 +712,7 @@ docker run --rm -p 8080:8080 \
   -e DEBUG_COMMAND_TOKEN=... \
   -e RELEASE_SIGNERS_FILE=/run/secrets/release-signers \
   -e RELEASE_VERSION=v0.86.0 \
-  ghcr.io/dembaca/mattermost-agent-registrar:0.9.0
+  ghcr.io/dembaca/mattermost-agent-registrar:0.10.0
 ```
 
 Serve `/register/v1/` on the same host as Mattermost (for example

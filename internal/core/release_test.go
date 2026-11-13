@@ -179,12 +179,12 @@ func TestParseReleaseSigners(t *testing.T) {
 }
 
 func TestReleaseVersionAndFingerprint(t *testing.T) {
-	for _, v := range []string{"v0.86.0", "v1.2.3", "v10.20.300", "v0.0.0"} {
+	for _, v := range []string{"v0.86.0", "v1.2.3", "v10.20.300", "v0.0.0", "latest"} {
 		if !ValidReleaseVersion(v) {
 			t.Errorf("%q refused", v)
 		}
 	}
-	for _, v := range []string{"", "0.86.0", "v0.86", "v0.86.0-rc1", "V0.86.0", "v0.86.0 ", "v01.2.3", "v1.02.3", "v1.2.03", "v00.1.0"} {
+	for _, v := range []string{"", "0.86.0", "v0.86", "v0.86.0-rc1", "V0.86.0", "v0.86.0 ", "v01.2.3", "v1.02.3", "v1.2.03", "v00.1.0", "Latest", "LATEST", "latest ", " latest", "v-latest", "latest\n"} {
 		if ValidReleaseVersion(v) {
 			t.Errorf("%q accepted", v)
 		}
