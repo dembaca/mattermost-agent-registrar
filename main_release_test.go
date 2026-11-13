@@ -179,9 +179,9 @@ func TestLoadConfigRelease(t *testing.T) {
 		t.Fatalf("keys only: %+v %v", cfg.release, err)
 	}
 	refused := map[string]map[string]string{
-		"type must be ssh-ed25519":              {"RELEASE_SIGNERS": "ssh-rsa " + strings.SplitN(k, " ", 2)[1]},
-		"RELEASE_VERSION: not v<x.y.z>":         {"RELEASE_SIGNERS": k, "RELEASE_VERSION": "0.86.0"},
-		"RELEASE_VERSION needs RELEASE_SIGNERS": {"RELEASE_VERSION": "v0.86.0"},
+		"type must be ssh-ed25519":                                                     {"RELEASE_SIGNERS": "ssh-rsa " + strings.SplitN(k, " ", 2)[1]},
+		"RELEASE_VERSION: not v<x.y.z>":                                                {"RELEASE_SIGNERS": k, "RELEASE_VERSION": "0.86.0"},
+		"RELEASE_VERSION needs RELEASE_SIGNERS":                                        {"RELEASE_VERSION": "v0.86.0"},
 		"RELEASE_VERSION: not v<x.y.z> without leading zeros, like v0.86.0, or latest": {"RELEASE_SIGNERS": k, "RELEASE_VERSION": "Latest"},
 		"set RELEASE_SIGNERS or RELEASE_SIGNERS_FILE, not both":                        {"RELEASE_SIGNERS": k, "RELEASE_SIGNERS_FILE": file},
 		"RELEASE_SIGNERS needs ATTESTATION_KEY":                                        {"RELEASE_SIGNERS": k, "ATTESTATION_KEY": "-"},
