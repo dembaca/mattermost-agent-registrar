@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.9.0
+
+- **Release record** (ADR-011 phase 3 of the agent bus): the operator names the
+  SSH keys that sign the bus's release tags and, optionally, the version hosts
+  should run; the registrar publishes both as one signed, installation-wide
+  record. Operator configuration only: no slash command, nothing per team or
+  channel. The hosts bound their trust in it: they pin the keys on first
+  contact and take an update only when it is newer, signed by a pinned key and
+  not withdrawn.
+- **`GET /register/v1/release`** (public, own rate bucket of 120 per minute per
+  IP, `Cache-Control: no-store`) returns `{"record":"<jws>"}`, header typ
+  `mm-agent-release+jwt`, claims `signers` (`"<type> <base64>"`, in config
+  order), `version` (absent when `RELEASE_VERSION` is unset), `set_at_ms` (the
+  registrar's start time: every restart moves it; consumers must not order or
+  key anything by it), `iat`, `exp` (1 h, signed fresh per read). `404` with `{"error":"no release set"}` when no signers are set. The
+  route exists only with an attestation key.
+- New env: `RELEASE_SIGNERS` or `RELEASE_SIGNERS_FILE` (not both): 1 to 16
+  `ssh-ed25519` or `sk-ssh-ed25519@openssh.com` public keys in strict base64,
+  published in canonical form; the variable newline- or comma-separated, the
+  file (at most 64 KiB) one key per line; a trailing comment dropped, `#` lines
+  skipped. `RELEASE_VERSION` (`v<x.y.z>` without leading zeros, needs signers).
+  Either needs the attestation key. A bad, repeated or unreadable key, more than
+  16 keys, a larger file, a bad version or a version without signers refuses to
+  start.
+  The startup log reports the version and the keys' SHA256 fingerprints, no
+  other key material.
+- Threat model: whoever holds the attestation key, the registrar host or write
+  access to `RELEASE_SIGNERS_FILE` can plant release keys on hosts before their
+  first contact; the README says how the hosts bound it.
+- No change to the other records or commands.
+
 ## 0.8.0
 
 - **`/agent-debug`** (ADR-010 phase 1 of the agent bus): a member of a team

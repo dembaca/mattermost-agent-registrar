@@ -428,6 +428,46 @@ The bus accepts a record only with the registrar's keys pinned. The record is
 public: anyone who knows a channel id can read which categories are on and who
 switched them.
 
+### Release record
+
+The registrar's operator names the SSH keys that sign the agent bus's release
+tags and, optionally, the version hosts should run, and the registrar publishes
+both as one signed record for the whole installation (ADR-011 phase 3 of the
+agent bus). The bus's hosts read it to learn which release keys to pin and which
+release to install. It is operator configuration (`RELEASE_SIGNERS`,
+`RELEASE_SIGNERS_FILE`, `RELEASE_VERSION`): there is no slash command and
+nothing per team or channel; a change takes a restart.
+
+The operator is trusted with this; the hosts bound that trust themselves: they
+pin the keys on first contact, and take an update only when it is newer than
+what they run, signed by a pinned key and not withdrawn.
+
+`GET /register/v1/release` (public, no auth, no channel or team id) returns the
+record signed for this request:
+
+| Status | Body |
+|--------|------|
+| `200` | `{"record":"<jws>"}` |
+| `404` | `{"error":"no release set"}`: neither `RELEASE_SIGNERS` nor `RELEASE_SIGNERS_FILE` is set |
+
+It has its own rate bucket (120 requests per minute per IP) and sends
+`Cache-Control: no-store`. The route exists only with an attestation key.
+
+The record is a compact JWS signed with the attestation key (same `kid` as in
+`GET /register/v1/keys`). The header is exactly
+`{"alg":"EdDSA","typ":"mm-agent-release+jwt","kid":"<kid>"}`. The payload is
+compact JSON with these claims, in this order:
+
+| Claim | Meaning |
+|-------|---------|
+| `signers` | the release signing keys, each `"<type> <base64>"` (`ssh-ed25519` or `sk-ssh-ed25519@openssh.com`, without comment), in config order |
+| `version` | the version hosts should run, `v<x.y.z>`; absent when `RELEASE_VERSION` is unset (the record then names the keys only) |
+| `set_at_ms` | the registrar's start time, unix **milliseconds**: the config is read only at start, and every restart moves it, changed config or not. Do not order or key anything by it |
+| `iat`, `exp` | unix seconds; signed fresh for each request, `exp` is `iat` + 1 h |
+
+At start the registrar logs the version and the keys' SHA256 fingerprints (as
+`ssh-keygen -l` shows them), no other key material.
+
 ### Health
 
 `GET /healthz` → `ok`
@@ -435,7 +475,7 @@ switched them.
 ### Version
 
 `GET /register/v1/version` (public, no auth, same rate limit as the keys) returns
-the deployed registrar version as `{"version":"0.8.0"}`. `/healthz` stays `ok`.
+the deployed registrar version as `{"version":"0.9.0"}`. `/healthz` stays `ok`.
 
 ## Environment
 
@@ -462,6 +502,9 @@ the deployed registrar version as `{"version":"0.8.0"}`. `/healthz` stays `ok`.
 | `MODE_COMMAND_TOKEN` | no | Verification token of the `/agent-ask-mode` slash command; comma-separated for one command per team. Enables `POST /register/v1/mode`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of `SLASH_COMMAND_TOKEN` and `ENROLLMENT_PEPPER` |
 | `MANDATE_COMMAND_TOKEN` | no | Verification token of the `/agent-mandate` slash command; comma-separated for one command per team. Enables `POST /register/v1/mandate`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of the other command tokens |
 | `DEBUG_COMMAND_TOKEN` | no | Verification token of the `/agent-debug` slash command; comma-separated for one command per team. Enables `POST /register/v1/debug`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of the other command tokens |
+| `RELEASE_SIGNERS` | no | The release signing keys of the [release record](#release-record): one to 16 SSH public keys, newline- or comma-separated, each `ssh-ed25519 <base64>` or `sk-ssh-ed25519@openssh.com <base64>` (strict base64); a trailing comment is dropped, lines starting with `#` are skipped. Enables the record. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`. Another key type, a malformed or repeated key, more than 16: the registrar does not start |
+| `RELEASE_SIGNERS_FILE` | no | Path to a file holding the same, one key per line as in `authorized_keys` (no commas between keys, so comments may hold commas), at most 64 KiB. Anyone who can write it plants release keys: protect it like the attestation key. Setting both this and `RELEASE_SIGNERS` is a configuration error |
+| `RELEASE_VERSION` | no | The version hosts should run, `v<x.y.z>` without leading zeros (e.g. `v0.86.0`). Needs `RELEASE_SIGNERS` or `RELEASE_SIGNERS_FILE`; without it the record names the keys only. Any other form: the registrar does not start |
 | `ATTESTATION_STORE` | no | Default `/data/attestations.json`. The claims of each bot, by bot id, behind `GET /register/v1/attestations/{bot_id}`; its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `MANDATE_STORE` | no | Default `/data/mandates.json`. The mandate per channel, its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `DEBUG_STORE` | no | Default `/data/debug.json`. The debug setting per channel, its own file (mode 0600, written atomically); ended settings are pruned at start and hourly. Read whenever an attestation key is set |
@@ -621,6 +664,17 @@ valid on a bus that still pins the old key until `exp`. A `via: secret` claim is
 only the caller's word: the registrar signs what it was told, so a verifier must
 not treat `responsible` as checked unless `via` is `enrollment`.
 
+**A forged release record.** Whoever holds the attestation key, or the
+registrar host, can sign a release record of their own, and it plants release
+keys on hosts that take the record before their first contact. TOFU and the
+hosts' pinned registrar keys bound this: a host that has already pinned release
+keys is exposed only to a planted `version`, and that version must still be
+signed by its own pinned keys and be newer than what it runs. A high-assurance
+host pre-pins with `MM_RELEASE_SIGNERS` instead of taking the record. Whoever
+can write `RELEASE_SIGNERS_FILE` plants keys the same way: protect it like the
+attestation key. Its contents are public keys, so this is integrity, not
+secrecy.
+
 **Who can mint tokens:** any active, non-guest member of a team with the slash
 command. Mattermost authenticates the caller; the registrar checks the command
 token, refuses bots (they can execute slash commands through the API) and
@@ -644,6 +698,7 @@ assign any owner), and a compromised registrar host.
 ```bash
 docker run --rm -p 8080:8080 \
   -v registrar-data:/data \
+  -v /etc/registrar/secrets:/run/secrets:ro \
   -e MATTERMOST_URL=http://mattermost:8065 \
   -e MATTERMOST_TOKEN=... \
   -e PUBLIC_CHAT_URL=https://chat.example.com \
@@ -655,7 +710,9 @@ docker run --rm -p 8080:8080 \
   -e MODE_COMMAND_TOKEN=... \
   -e MANDATE_COMMAND_TOKEN=... \
   -e DEBUG_COMMAND_TOKEN=... \
-  ghcr.io/dembaca/mattermost-agent-registrar:0.5.1
+  -e RELEASE_SIGNERS_FILE=/run/secrets/release-signers \
+  -e RELEASE_VERSION=v0.86.0 \
+  ghcr.io/dembaca/mattermost-agent-registrar:0.9.0
 ```
 
 Serve `/register/v1/` on the same host as Mattermost (for example
@@ -669,7 +726,7 @@ the token store is a local file.
 - `main.go`: configuration from the environment, HTTP handlers, rate limit.
 - `internal/core`: the provider-neutral protocol: enrollment tokens and their
   store, scope and policy, the bot description, the `/agent-token` command, the
-  owner attestation (with the per-bot claims it serves) and the `/agent-ask-mode`, `/agent-mandate` and `/agent-debug` commands with their stores and records. It
+  owner attestation (with the per-bot claims it serves), the release record and the `/agent-ask-mode`, `/agent-mandate` and `/agent-debug` commands with their stores and records. It
   talks to the chat system only through `core.ProviderPort` and imports no
   provider (a test checks this).
 - `internal/mattermost`: the Mattermost adapter implementing `ProviderPort`

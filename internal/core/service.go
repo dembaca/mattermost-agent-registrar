@@ -30,6 +30,8 @@ var (
 	ErrNoDebug = errors.New("no debug set")
 	// ErrNoAttestation: no attestation is recorded for the bot, or it is gone.
 	ErrNoAttestation = errors.New("no attestation")
+	// ErrNoRelease: the operator set no release signers.
+	ErrNoRelease = errors.New("no release set")
 )
 
 var (
@@ -76,7 +78,9 @@ type Service struct {
 	// Claims: nil means no attestation endpoint; the claims of every bot
 	// registered while it is set are kept here.
 	Claims *ClaimStore
-	Now    func() time.Time
+	// Release: nil means no release record (release.go).
+	Release *Release
+	Now     func() time.Time
 
 	enrollMu sync.Mutex // serialises enrollments, so MaxBots holds under concurrency
 }

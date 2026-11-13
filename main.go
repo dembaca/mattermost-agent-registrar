@@ -19,7 +19,7 @@ import (
 )
 
 // version is the release; CHANGELOG.md and the image tag in CI follow it.
-const version = "0.8.0"
+const version = "0.9.0"
 
 // pruneEvery is how often the token store is pruned while running.
 const pruneEvery = time.Hour
@@ -37,6 +37,8 @@ type config struct {
 	debugRateLimitPerMin int
 	// attestationRateLimitPerMin is the own bucket of GET /register/v1/attestations/….
 	attestationRateLimitPerMin int
+	// releaseRateLimitPerMin is the own bucket of GET /register/v1/release.
+	releaseRateLimitPerMin int
 	// trustedProxyHops is how many proxies in front of the registrar append to
 	// X-Forwarded-For; the entry that many places from the right is the client.
 	// 0 (the default): the header is ignored, nothing is trusted unconfigured.
@@ -53,6 +55,7 @@ type config struct {
 	mm               mattermost.Config
 	policy           core.Policy
 	attestor         *core.Attestor // nil: no attestation, no mode records
+	release          *core.Release  // nil: no release signers set
 }
 
 type server struct {
@@ -70,6 +73,7 @@ type server struct {
 	debugPort       core.ProviderPort
 	debugRate       *limiter
 	attestationRate *limiter
+	releaseRate     *limiter
 }
 
 // limiter is a per-IP sliding window of one minute.
@@ -103,6 +107,13 @@ func main() {
 	if cfg.attestor != nil {
 		log.Info("attestation on", "kid", cfg.attestor.Kid(), "ttl", cfg.attestor.TTL.String(),
 			"mode_command", s.modePort != nil, "mandate_command", s.mandatePort != nil, "debug_command", s.debugPort != nil)
+	}
+	if r := cfg.release; r != nil {
+		fps := make([]string, len(r.Signers))
+		for i, k := range r.Signers {
+			fps[i] = core.SignerFingerprint(k)
+		}
+		log.Info("release record", "version", r.Version, "signers", fps)
 	}
 	log.Info("listening", "version", version, "addr", cfg.listenAddr, "mattermost", cfg.mm.URL,
 		"shared_secret", cfg.policy.SharedSecret != "", "enrollment", s.svc.Store != nil,
@@ -167,6 +178,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		mandateRateLimitPerMin:     120,
 		debugRateLimitPerMin:       120,
 		attestationRateLimitPerMin: 120,
+		releaseRateLimitPerMin:     120,
 		trustedProxyHops:           num("TRUSTED_PROXY_HOPS", 0),
 		attestationStore:           env("ATTESTATION_STORE", "/data/attestations.json"),
 		enrollStore:                env("ENROLLMENT_STORE", "/data/enrollments.json"),
@@ -206,6 +218,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.policy.SharedSecret = env("REGISTRATION_SECRET", "")
 	}
 	cfg.attestor = loadAttestor(env, ttl, &errs)
+	cfg.release = loadRelease(env, &errs)
 	p := cfg.policy
 	if p.DefaultTTL > p.MaxTTL {
 		errs = append(errs, errors.New("ENROLLMENT_DEFAULT_TTL exceeds ENROLLMENT_MAX_TTL"))
@@ -221,6 +234,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if len(cfg.debugTokens) > 0 && env("ATTESTATION_KEY", "") == "" && env("ATTESTATION_KEY_FILE", "") == "" {
 		errs = append(errs, errors.New("DEBUG_COMMAND_TOKEN needs ATTESTATION_KEY or ATTESTATION_KEY_FILE: debug records are signed"))
+	}
+	if cfg.release != nil && env("ATTESTATION_KEY", "") == "" && env("ATTESTATION_KEY_FILE", "") == "" {
+		errs = append(errs, errors.New("RELEASE_SIGNERS needs ATTESTATION_KEY or ATTESTATION_KEY_FILE: the release record is signed"))
 	}
 	enroll := len(cfg.mm.CommandTokens) > 0
 	switch {
@@ -273,6 +289,72 @@ func loadAttestor(env func(k, def string) string, ttl func(k, def string) time.D
 	return a
 }
 
+// maxReleaseSignersFile is the largest RELEASE_SIGNERS_FILE read.
+const maxReleaseSignersFile = 64 << 10
+
+// loadRelease reads RELEASE_SIGNERS or RELEASE_SIGNERS_FILE and
+// RELEASE_VERSION (ADR-011 phase 3 of the agent bus). Neither set: nil, no
+// release record. A version needs signers; signers alone publish only the keys.
+// SetAt is now, the registrar's start time.
+func loadRelease(env func(k, def string) string, errs *[]error) *core.Release {
+	keys, file, ver := env("RELEASE_SIGNERS", ""), env("RELEASE_SIGNERS_FILE", ""), env("RELEASE_VERSION", "")
+	ok := true
+	if ver != "" && !core.ValidReleaseVersion(ver) {
+		*errs = append(*errs, errors.New("RELEASE_VERSION: not v<x.y.z> without leading zeros, like v0.86.0"))
+		ok = false
+	}
+	if keys != "" && file != "" {
+		*errs = append(*errs, errors.New("set RELEASE_SIGNERS or RELEASE_SIGNERS_FILE, not both"))
+		return nil
+	}
+	name, commas := "RELEASE_SIGNERS", true
+	if file != "" {
+		name, commas = "RELEASE_SIGNERS_FILE", false
+		b, err := readCapped(file, maxReleaseSignersFile)
+		if err != nil {
+			*errs = append(*errs, fmt.Errorf("RELEASE_SIGNERS_FILE: %v", err))
+			return nil
+		}
+		keys = strings.TrimSpace(string(b))
+		if keys == "" {
+			*errs = append(*errs, fmt.Errorf("RELEASE_SIGNERS_FILE: %s holds no key", file))
+			return nil
+		}
+	}
+	if keys == "" {
+		if ver != "" {
+			*errs = append(*errs, errors.New("RELEASE_VERSION needs RELEASE_SIGNERS or RELEASE_SIGNERS_FILE"))
+		}
+		return nil
+	}
+	signers, err := core.ParseReleaseSigners(keys, commas)
+	if err != nil {
+		*errs = append(*errs, fmt.Errorf("%s: %v", name, err))
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	return &core.Release{Signers: signers, Version: ver, SetAt: time.Now()}
+}
+
+// readCapped reads file, refusing one larger than max bytes.
+func readCapped(file string, max int64) ([]byte, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s", file)
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s", file)
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%s is larger than %d KiB", file, max>>10)
+	}
+	return b, nil
+}
+
 func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, error) {
 	port := &mattermost.Adapter{Cfg: cfg.mm, Client: client, Log: log}
 	svc := &core.Service{Provider: port, Policy: cfg.policy, Log: log, Attestor: cfg.attestor}
@@ -287,7 +369,8 @@ func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, erro
 		rate: newLimiter(cfg.rateLimitPerMin), modeRate: newLimiter(cfg.modeRateLimitPerMin),
 		mandateRate:     newLimiter(cfg.mandateRateLimitPerMin),
 		debugRate:       newLimiter(cfg.debugRateLimitPerMin),
-		attestationRate: newLimiter(cfg.attestationRateLimitPerMin)}
+		attestationRate: newLimiter(cfg.attestationRateLimitPerMin),
+		releaseRate:     newLimiter(cfg.releaseRateLimitPerMin)}
 	if cfg.attestor != nil {
 		// The store is read for GET /register/v1/modes/… even without the
 		// command, so modes set earlier stay published.
@@ -330,6 +413,7 @@ func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, erro
 			mcfg.CommandTokens = cfg.debugTokens
 			s.debugPort = &mattermost.Adapter{Cfg: mcfg, Client: client, Log: log}
 		}
+		svc.Release = cfg.release
 	}
 	return s, nil
 }
@@ -364,6 +448,9 @@ func (s *server) routes() http.Handler {
 	}
 	if s.svc.Claims != nil {
 		mux.HandleFunc("GET /register/v1/attestations/{bot_id}", s.handleAttestation)
+	}
+	if s.svc.Attestor != nil {
+		mux.HandleFunc("GET /register/v1/release", s.handleRelease)
 	}
 	return mux
 }
@@ -638,6 +725,31 @@ func (s *server) handleDebug(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no debug set"})
 	case err != nil:
 		s.log.Error("sign debug record", "err", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
+	default:
+		_ = json.NewEncoder(w).Encode(map[string]string{"record": rec})
+	}
+}
+
+// handleRelease publishes the operator's release signers and version as a
+// signed record, signed fresh for each request (ADR-011 phase 3 of the agent
+// bus). Public, installation wide; its own rate bucket. 404 with "no release
+// set" when the operator set none.
+func (s *server) handleRelease(w http.ResponseWriter, r *http.Request) {
+	if !s.releaseRate.allow(s.clientIP(r)) {
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
+	rec, err := s.svc.ReleaseRecord()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	switch {
+	case errors.Is(err, core.ErrNoRelease):
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no release set"})
+	case err != nil:
+		s.log.Error("sign release record", "err", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
 	default:
