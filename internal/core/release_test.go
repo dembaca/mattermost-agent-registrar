@@ -184,7 +184,7 @@ func TestReleaseVersionAndFingerprint(t *testing.T) {
 			t.Errorf("%q refused", v)
 		}
 	}
-	for _, v := range []string{"", "0.86.0", "v0.86", "v0.86.0-rc1", "V0.86.0", "v0.86.0 ", "v01.2.3", "v1.02.3", "v1.2.03", "v00.1.0", "Latest", "LATEST", "latest ", " latest", "v-latest", "latest\n"} {
+	for _, v := range []string{"", "0.86.0", "v0.86", "v0.86.0-rc1", "V0.86.0", "v0.86.0 ", "v01.2.3", "v1.02.3", "v1.2.03", "v00.1.0", "Latest", "LATEST", "latest ", " latest", "v-latest", "vlatest", "latest\n"} {
 		if ValidReleaseVersion(v) {
 			t.Errorf("%q accepted", v)
 		}

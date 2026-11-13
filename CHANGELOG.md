@@ -10,6 +10,10 @@
   rolls out step by step. Hosts on bus 0.86.x see a claim they do not accept
   and change nothing. Like a version, `latest` needs signers; the startup error
   for any other value names both forms.
+- The trade-off: under `latest` every signed tag goes live for all hosts (bus
+  0.87.0 or later) at their next session end, with no step in between; a bad
+  one is pulled back only by a later tag that withdraws it (`Withdrawn:`), or
+  by holding a host. A fixed pin lets the operator check one host first.
 
 ## 0.9.0
 
