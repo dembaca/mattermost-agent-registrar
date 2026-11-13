@@ -171,6 +171,19 @@ func TestLoadConfigRelease(t *testing.T) {
 			t.Errorf("%v: error carries key material: %v", env, err)
 		}
 	}
+	// A bad version and bad signers are reported together.
+	_, err = loadReleaseEnv(map[string]string{"RELEASE_SIGNERS": "ssh-rsa AAAA", "RELEASE_VERSION": "v01.0.0"})
+	if err == nil || !strings.Contains(err.Error(), "RELEASE_VERSION: not") || !strings.Contains(err.Error(), "RELEASE_SIGNERS: key 1") {
+		t.Fatalf("both errors: %v", err)
+	}
+	// The file is capped at 64 KiB.
+	big := filepath.Join(t.TempDir(), "big")
+	if err := os.WriteFile(big, []byte(k+"\n"+strings.Repeat("#", 64<<10)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadReleaseEnv(map[string]string{"RELEASE_SIGNERS_FILE": big}); err == nil || !strings.Contains(err.Error(), "larger than 64 KiB") {
+		t.Fatalf("big file: %v", err)
+	}
 	// Version needs signers also with the key: a version alone never publishes.
 	if _, err := loadReleaseEnv(map[string]string{"RELEASE_VERSION": "v0.86.0", "ATTESTATION_KEY": "-"}); err == nil {
 		t.Fatal("version alone without key accepted")

@@ -462,7 +462,7 @@ compact JSON with these claims, in this order:
 |-------|---------|
 | `signers` | the release signing keys, each `"<type> <base64>"` (`ssh-ed25519` or `sk-ssh-ed25519@openssh.com`, without comment), in config order |
 | `version` | the version hosts should run, `v<x.y.z>`; absent when `RELEASE_VERSION` is unset (the record then names the keys only) |
-| `set_at_ms` | when the registrar started with this config, unix **milliseconds** |
+| `set_at_ms` | the registrar's start time, unix **milliseconds**: the config is read only at start, and every restart moves it, changed config or not. Do not order or key anything by it |
 | `iat`, `exp` | unix seconds; signed fresh for each request, `exp` is `iat` + 1 h |
 
 At start the registrar logs the version and the keys' SHA256 fingerprints (as
@@ -502,9 +502,9 @@ the deployed registrar version as `{"version":"0.9.0"}`. `/healthz` stays `ok`.
 | `MODE_COMMAND_TOKEN` | no | Verification token of the `/agent-ask-mode` slash command; comma-separated for one command per team. Enables `POST /register/v1/mode`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of `SLASH_COMMAND_TOKEN` and `ENROLLMENT_PEPPER` |
 | `MANDATE_COMMAND_TOKEN` | no | Verification token of the `/agent-mandate` slash command; comma-separated for one command per team. Enables `POST /register/v1/mandate`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of the other command tokens |
 | `DEBUG_COMMAND_TOKEN` | no | Verification token of the `/agent-debug` slash command; comma-separated for one command per team. Enables `POST /register/v1/debug`. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`, or the registrar does not start. Independent of the other command tokens |
-| `RELEASE_SIGNERS` | no | The release signing keys of the [release record](#release-record): one or more SSH public keys, newline- or comma-separated, each `ssh-ed25519 <base64>` or `sk-ssh-ed25519@openssh.com <base64>`; a trailing comment is dropped, lines starting with `#` are skipped. Enables the record. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`. Another key type, a malformed or repeated key: the registrar does not start |
-| `RELEASE_SIGNERS_FILE` | no | Path to a file holding the same (public keys as in `authorized_keys`, one per line). Setting both this and `RELEASE_SIGNERS` is a configuration error |
-| `RELEASE_VERSION` | no | The version hosts should run, `v<x.y.z>` (e.g. `v0.86.0`). Needs `RELEASE_SIGNERS` or `RELEASE_SIGNERS_FILE`; without it the record names the keys only. Any other form: the registrar does not start |
+| `RELEASE_SIGNERS` | no | The release signing keys of the [release record](#release-record): one to 16 SSH public keys, newline- or comma-separated, each `ssh-ed25519 <base64>` or `sk-ssh-ed25519@openssh.com <base64>` (strict base64); a trailing comment is dropped, lines starting with `#` are skipped. Enables the record. Needs `ATTESTATION_KEY` or `ATTESTATION_KEY_FILE`. Another key type, a malformed or repeated key, more than 16: the registrar does not start |
+| `RELEASE_SIGNERS_FILE` | no | Path to a file holding the same, one key per line as in `authorized_keys` (no commas between keys, so comments may hold commas), at most 64 KiB. Anyone who can write it plants release keys: protect it like the attestation key. Setting both this and `RELEASE_SIGNERS` is a configuration error |
+| `RELEASE_VERSION` | no | The version hosts should run, `v<x.y.z>` without leading zeros (e.g. `v0.86.0`). Needs `RELEASE_SIGNERS` or `RELEASE_SIGNERS_FILE`; without it the record names the keys only. Any other form: the registrar does not start |
 | `ATTESTATION_STORE` | no | Default `/data/attestations.json`. The claims of each bot, by bot id, behind `GET /register/v1/attestations/{bot_id}`; its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `MANDATE_STORE` | no | Default `/data/mandates.json`. The mandate per channel, its own file (mode 0600, written atomically); put it on a persistent volume. Read whenever an attestation key is set |
 | `DEBUG_STORE` | no | Default `/data/debug.json`. The debug setting per channel, its own file (mode 0600, written atomically); ended settings are pruned at start and hourly. Read whenever an attestation key is set |
@@ -664,6 +664,17 @@ valid on a bus that still pins the old key until `exp`. A `via: secret` claim is
 only the caller's word: the registrar signs what it was told, so a verifier must
 not treat `responsible` as checked unless `via` is `enrollment`.
 
+**A forged release record.** Whoever holds the attestation key, or the
+registrar host, can sign a release record of their own, and it plants release
+keys on hosts that take the record before their first contact. TOFU and the
+hosts' pinned registrar keys bound this: a host that has already pinned release
+keys is exposed only to a planted `version`, and that version must still be
+signed by its own pinned keys and be newer than what it runs. A high-assurance
+host pre-pins with `MM_RELEASE_SIGNERS` instead of taking the record. Whoever
+can write `RELEASE_SIGNERS_FILE` plants keys the same way: protect it like the
+attestation key. Its contents are public keys, so this is integrity, not
+secrecy.
+
 **Who can mint tokens:** any active, non-guest member of a team with the slash
 command. Mattermost authenticates the caller; the registrar checks the command
 token, refuses bots (they can execute slash commands through the API) and
@@ -687,6 +698,7 @@ assign any owner), and a compromised registrar host.
 ```bash
 docker run --rm -p 8080:8080 \
   -v registrar-data:/data \
+  -v /etc/registrar/secrets:/run/secrets:ro \
   -e MATTERMOST_URL=http://mattermost:8065 \
   -e MATTERMOST_TOKEN=... \
   -e PUBLIC_CHAT_URL=https://chat.example.com \

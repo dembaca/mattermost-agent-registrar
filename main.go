@@ -289,26 +289,30 @@ func loadAttestor(env func(k, def string) string, ttl func(k, def string) time.D
 	return a
 }
 
+// maxReleaseSignersFile is the largest RELEASE_SIGNERS_FILE read.
+const maxReleaseSignersFile = 64 << 10
+
 // loadRelease reads RELEASE_SIGNERS or RELEASE_SIGNERS_FILE and
 // RELEASE_VERSION (ADR-011 phase 3 of the agent bus). Neither set: nil, no
 // release record. A version needs signers; signers alone publish only the keys.
-// set_at is now: when the registrar started with this config.
+// SetAt is now, the registrar's start time.
 func loadRelease(env func(k, def string) string, errs *[]error) *core.Release {
 	keys, file, ver := env("RELEASE_SIGNERS", ""), env("RELEASE_SIGNERS_FILE", ""), env("RELEASE_VERSION", "")
+	ok := true
 	if ver != "" && !core.ValidReleaseVersion(ver) {
-		*errs = append(*errs, errors.New("RELEASE_VERSION: not v<x.y.z>, like v0.86.0"))
-		return nil
+		*errs = append(*errs, errors.New("RELEASE_VERSION: not v<x.y.z> without leading zeros, like v0.86.0"))
+		ok = false
 	}
 	if keys != "" && file != "" {
 		*errs = append(*errs, errors.New("set RELEASE_SIGNERS or RELEASE_SIGNERS_FILE, not both"))
 		return nil
 	}
-	name := "RELEASE_SIGNERS"
+	name, commas := "RELEASE_SIGNERS", true
 	if file != "" {
-		name = "RELEASE_SIGNERS_FILE"
-		b, err := os.ReadFile(file)
+		name, commas = "RELEASE_SIGNERS_FILE", false
+		b, err := readCapped(file, maxReleaseSignersFile)
 		if err != nil {
-			*errs = append(*errs, fmt.Errorf("RELEASE_SIGNERS_FILE: cannot read %s", file))
+			*errs = append(*errs, fmt.Errorf("RELEASE_SIGNERS_FILE: %v", err))
 			return nil
 		}
 		keys = strings.TrimSpace(string(b))
@@ -323,12 +327,32 @@ func loadRelease(env func(k, def string) string, errs *[]error) *core.Release {
 		}
 		return nil
 	}
-	signers, err := core.ParseReleaseSigners(keys)
+	signers, err := core.ParseReleaseSigners(keys, commas)
 	if err != nil {
 		*errs = append(*errs, fmt.Errorf("%s: %v", name, err))
 		return nil
 	}
+	if !ok {
+		return nil
+	}
 	return &core.Release{Signers: signers, Version: ver, SetAt: time.Now()}
+}
+
+// readCapped reads file, refusing one larger than max bytes.
+func readCapped(file string, max int64) ([]byte, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s", file)
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s", file)
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%s is larger than %d KiB", file, max>>10)
+	}
+	return b, nil
 }
 
 func newServer(cfg config, client *http.Client, log *slog.Logger) (*server, error) {

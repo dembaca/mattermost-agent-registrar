@@ -28,12 +28,13 @@ const (
 	ReleaseTTL = time.Hour
 )
 
-// ReleaseSignerTypes are the SSH key types a release signer may have.
-var ReleaseSignerTypes = []string{"ssh-ed25519", "sk-ssh-ed25519@openssh.com"}
+// releaseSignerTypes are the SSH key types a release signer may have.
+var releaseSignerTypes = []string{"ssh-ed25519", "sk-ssh-ed25519@openssh.com"}
 
-var releaseVersionRE = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
+var releaseVersionRE = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
-// ValidReleaseVersion says whether v is a release version: v<x.y.z>.
+// ValidReleaseVersion says whether v is a release version: v<x.y.z>, no
+// leading zeros.
 func ValidReleaseVersion(v string) bool { return releaseVersionRE.MatchString(v) }
 
 // ReleaseClaims is the payload of a release record. Field order is the wire
@@ -41,7 +42,7 @@ func ValidReleaseVersion(v string) bool { return releaseVersionRE.MatchString(v)
 type ReleaseClaims struct {
 	Signers []string `json:"signers"`           // "<type> <base64>", in config order
 	Version string   `json:"version,omitempty"` // v<x.y.z>; absent: the record names keys only
-	SetAtMs int64    `json:"set_at_ms"`         // when the registrar started with this config, unix milliseconds
+	SetAtMs int64    `json:"set_at_ms"`         // the registrar's start time, unix milliseconds; not when the setting changed
 	Iat     int64    `json:"iat"`
 	Exp     int64    `json:"exp"`
 }
@@ -50,7 +51,10 @@ type ReleaseClaims struct {
 type Release struct {
 	Signers []string // "<type> <base64>", never empty
 	Version string   // "" or v<x.y.z>
-	SetAt   time.Time
+	// SetAt is the registrar's start time: the config is read only then, and
+	// every restart moves it, the same config or not. Consumers must not order
+	// or key anything by it.
+	SetAt time.Time
 }
 
 // SignRelease stamps iat (now) and exp (now + ReleaseTTL) on c and returns the
@@ -92,20 +96,29 @@ func (s *Service) ReleaseRecord() (string, error) {
 	}, s.now())
 }
 
-// ParseReleaseSigners reads SSH public keys, one per line or comma-separated,
-// in authorized_keys form. Blank lines and lines starting with # are skipped; a
-// trailing comment after the key is dropped. Each key must be ssh-ed25519 or
-// sk-ssh-ed25519@openssh.com with a well-formed key blob of that type. Returns
-// "<type> <base64>" per key, in order. Errors name the entry by its number and
-// never carry key material.
-func ParseReleaseSigners(text string) ([]string, error) {
+// MaxReleaseSigners is the most release signers a registrar publishes.
+const MaxReleaseSigners = 16
+
+// ParseReleaseSigners reads SSH public keys in authorized_keys form, one per
+// line; with commas (the environment variable) also comma-separated. In a file
+// (commas false) a comment may contain commas. Blank lines and lines starting
+// with # are skipped; a trailing comment after the key is dropped. Each key
+// must be ssh-ed25519 or sk-ssh-ed25519@openssh.com with a well-formed key blob
+// of that type in strict base64. Returns the canonical "<type> <base64>" per
+// key, in order; a repeated key and more than MaxReleaseSigners are refused.
+// Errors name the entry by its number and never carry key material.
+func ParseReleaseSigners(text string, commas bool) ([]string, error) {
 	var out []string
 	n := 0
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "#") {
 			continue
 		}
-		for _, entry := range strings.Split(line, ",") {
+		entries := []string{line}
+		if commas {
+			entries = strings.Split(line, ",")
+		}
+		for _, entry := range entries {
 			f := strings.Fields(entry)
 			if len(f) == 0 {
 				continue
@@ -114,15 +127,19 @@ func ParseReleaseSigners(text string) ([]string, error) {
 			if len(f) < 2 {
 				return nil, fmt.Errorf("key %d: not \"<type> <base64>\"", n)
 			}
-			if !slices.Contains(ReleaseSignerTypes, f[0]) {
+			if !slices.Contains(releaseSignerTypes, f[0]) {
 				return nil, fmt.Errorf("key %d: type must be ssh-ed25519 or sk-ssh-ed25519@openssh.com", n)
 			}
-			if err := checkSSHBlob(f[0], f[1]); err != nil {
+			blob, err := checkSSHBlob(f[0], f[1])
+			if err != nil {
 				return nil, fmt.Errorf("key %d: %v", n, err)
 			}
-			k := f[0] + " " + f[1]
+			k := f[0] + " " + base64.StdEncoding.EncodeToString(blob)
 			if slices.Contains(out, k) {
 				return nil, fmt.Errorf("key %d: listed twice", n)
+			}
+			if len(out) == MaxReleaseSigners {
+				return nil, fmt.Errorf("more than %d keys", MaxReleaseSigners)
 			}
 			out = append(out, k)
 		}
@@ -133,41 +150,43 @@ func ParseReleaseSigners(text string) ([]string, error) {
 	return out, nil
 }
 
-// checkSSHBlob checks that b64 is the SSH wire form of a key of type typ: the
-// type string, a 32-byte Ed25519 key and, for a security key, its application.
-func checkSSHBlob(typ, b64 string) error {
-	blob, err := base64.StdEncoding.DecodeString(b64)
+// checkSSHBlob decodes b64 (strict base64) and checks that it is the SSH wire
+// form of a key of type typ: the type string, a 32-byte Ed25519 key and, for a
+// security key, its application. Returns the blob.
+func checkSSHBlob(typ, b64 string) ([]byte, error) {
+	blob, err := base64.StdEncoding.Strict().DecodeString(b64)
 	if err != nil {
-		return errors.New("key data is not base64")
+		return nil, errors.New("key data is not base64")
 	}
+	rest := blob
 	next := func() ([]byte, bool) {
-		if len(blob) < 4 {
+		if len(rest) < 4 {
 			return nil, false
 		}
-		l := binary.BigEndian.Uint32(blob)
-		if uint64(len(blob)-4) < uint64(l) {
+		l := binary.BigEndian.Uint32(rest)
+		if uint64(len(rest)-4) < uint64(l) {
 			return nil, false
 		}
-		v := blob[4 : 4+l]
-		blob = blob[4+l:]
+		v := rest[4 : 4+l]
+		rest = rest[4+l:]
 		return v, true
 	}
 	t, ok := next()
 	if !ok || string(t) != typ {
-		return errors.New("key data does not match its type")
+		return nil, errors.New("key data does not match its type")
 	}
 	if k, ok := next(); !ok || len(k) != ed25519.PublicKeySize {
-		return errors.New("key data is not an Ed25519 key")
+		return nil, errors.New("key data is not an Ed25519 key")
 	}
 	if typ == "sk-ssh-ed25519@openssh.com" {
 		if app, ok := next(); !ok || len(app) == 0 {
-			return errors.New("key data has no application")
+			return nil, errors.New("key data has no application")
 		}
 	}
-	if len(blob) != 0 {
-		return errors.New("key data has trailing bytes")
+	if len(rest) != 0 {
+		return nil, errors.New("key data has trailing bytes")
 	}
-	return nil
+	return blob, nil
 }
 
 // SignerFingerprint is the OpenSSH SHA256 fingerprint of a "<type> <base64>"

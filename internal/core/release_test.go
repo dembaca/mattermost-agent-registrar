@@ -116,9 +116,36 @@ func TestParseReleaseSigners(t *testing.T) {
 	k1 := sshKey("ssh-ed25519", keyBytes(1), "")
 	k2 := sshKey("sk-ssh-ed25519@openssh.com", keyBytes(2), "ssh:")
 	k3 := sshKey("ssh-ed25519", keyBytes(3), "")
-	got, err := ParseReleaseSigners("# release keys\n" + k1 + " owner@laptop\n\n" + k2 + " yubikey 5c, " + k3)
+	got, err := ParseReleaseSigners("# release keys\n"+k1+" owner@laptop\n\n"+k2+" yubikey 5c, "+k3, true)
 	if err != nil || !reflect.DeepEqual(got, []string{k1, k2, k3}) {
 		t.Fatalf("parse: %q %v", got, err)
+	}
+	// A file is one key per line: its comments may hold commas.
+	got, err = ParseReleaseSigners("# keys, all of them\n"+k1+" owner, laptop\n"+k2+" yubikey, 5c", false)
+	if err != nil || !reflect.DeepEqual(got, []string{k1, k2}) {
+		t.Fatalf("file: %q %v", got, err)
+	}
+	if _, err := ParseReleaseSigners(k1+", "+k3, false); err == nil {
+		t.Fatal("a comma-separated file line passed")
+	}
+	// At most MaxReleaseSigners.
+	var many []string
+	for i := 0; i <= MaxReleaseSigners; i++ {
+		many = append(many, sshKey("ssh-ed25519", keyBytes(byte(10+i)), ""))
+	}
+	if got, err := ParseReleaseSigners(strings.Join(many[:MaxReleaseSigners], "\n"), false); err != nil || len(got) != MaxReleaseSigners {
+		t.Fatalf("16 keys: %d %v", len(got), err)
+	}
+	if _, err := ParseReleaseSigners(strings.Join(many, ","), true); err == nil || !strings.Contains(err.Error(), "more than 16 keys") {
+		t.Fatalf("17 keys: %v", err)
+	}
+	// Strict base64: nonzero padding bits are refused, not read as the same key.
+	b := strings.SplitN(k2, " ", 2)[1]
+	i := strings.IndexByte(b, '=') - 1
+	const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	loose := b[:i] + string(alpha[strings.IndexByte(alpha, b[i])+1]) + b[i+1:]
+	if _, err := ParseReleaseSigners("sk-ssh-ed25519@openssh.com "+loose, true); err == nil || !strings.Contains(err.Error(), "not base64") {
+		t.Fatalf("loose base64: %v", err)
 	}
 	rsa := "ssh-rsa " + strings.SplitN(k1, " ", 2)[1]
 	bad := map[string]string{
@@ -131,11 +158,11 @@ func TestParseReleaseSigners(t *testing.T) {
 		"ssh-ed25519 " + strings.SplitN(k2, " ", 2)[1]:                     "does not match its type",
 		sshKey("ssh-ed25519", keyBytes(1)[:31], ""):                        "not an Ed25519 key",
 		sshKey("sk-ssh-ed25519@openssh.com", keyBytes(2), ""):              "no application",
-		sshKey("sk-ssh-ed25519@openssh.com", keyBytes(2), "ssh:") + "AAAA": "", // padding mismatch or trailing bytes: some error
+		sshKey("sk-ssh-ed25519@openssh.com", keyBytes(2), "ssh:") + "AAAA": "not base64", // data after the padding
 		k1 + "\n" + k1 + " again":                                          "key 2: listed twice",
 	}
 	for in, want := range bad {
-		_, err := ParseReleaseSigners(in)
+		_, err := ParseReleaseSigners(in, true)
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: %v, want %q", in, err, want)
 		}
@@ -145,19 +172,19 @@ func TestParseReleaseSigners(t *testing.T) {
 	}
 	// Trailing bytes after a well-formed key are refused.
 	blob, _ := base64.StdEncoding.DecodeString(strings.SplitN(k1, " ", 2)[1])
-	if _, err := ParseReleaseSigners("ssh-ed25519 " + base64.StdEncoding.EncodeToString(append(blob, 0))); err == nil ||
+	if _, err := ParseReleaseSigners("ssh-ed25519 "+base64.StdEncoding.EncodeToString(append(blob, 0)), true); err == nil ||
 		!strings.Contains(err.Error(), "trailing bytes") {
 		t.Fatalf("trailing bytes: %v", err)
 	}
 }
 
 func TestReleaseVersionAndFingerprint(t *testing.T) {
-	for _, v := range []string{"v0.86.0", "v1.2.3", "v10.20.300"} {
+	for _, v := range []string{"v0.86.0", "v1.2.3", "v10.20.300", "v0.0.0"} {
 		if !ValidReleaseVersion(v) {
 			t.Errorf("%q refused", v)
 		}
 	}
-	for _, v := range []string{"", "0.86.0", "v0.86", "v0.86.0-rc1", "V0.86.0", "v0.86.0 ", "v01.x.0"} {
+	for _, v := range []string{"", "0.86.0", "v0.86", "v0.86.0-rc1", "V0.86.0", "v0.86.0 ", "v01.2.3", "v1.02.3", "v1.2.03", "v00.1.0"} {
 		if ValidReleaseVersion(v) {
 			t.Errorf("%q accepted", v)
 		}
