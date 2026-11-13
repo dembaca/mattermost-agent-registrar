@@ -19,7 +19,7 @@ import (
 )
 
 // version is the release; CHANGELOG.md and the image tag in CI follow it.
-const version = "0.9.0"
+const version = "0.10.0"
 
 // pruneEvery is how often the token store is pruned while running.
 const pruneEvery = time.Hour
@@ -300,7 +300,7 @@ func loadRelease(env func(k, def string) string, errs *[]error) *core.Release {
 	keys, file, ver := env("RELEASE_SIGNERS", ""), env("RELEASE_SIGNERS_FILE", ""), env("RELEASE_VERSION", "")
 	ok := true
 	if ver != "" && !core.ValidReleaseVersion(ver) {
-		*errs = append(*errs, errors.New("RELEASE_VERSION: not v<x.y.z> without leading zeros, like v0.86.0"))
+		*errs = append(*errs, errors.New("RELEASE_VERSION: not v<x.y.z> without leading zeros, like v0.86.0, or latest"))
 		ok = false
 	}
 	if keys != "" && file != "" {

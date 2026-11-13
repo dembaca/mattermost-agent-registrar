@@ -33,15 +33,19 @@ var releaseSignerTypes = []string{"ssh-ed25519", "sk-ssh-ed25519@openssh.com"}
 
 var releaseVersionRE = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
-// ValidReleaseVersion says whether v is a release version: v<x.y.z>, no
-// leading zeros.
-func ValidReleaseVersion(v string) bool { return releaseVersionRE.MatchString(v) }
+// ReleaseLatest is the release setting that lets hosts follow the newest
+// signed tag instead of a fixed version.
+const ReleaseLatest = "latest"
+
+// ValidReleaseVersion says whether v is a release setting: v<x.y.z>, no
+// leading zeros, or exactly "latest".
+func ValidReleaseVersion(v string) bool { return v == ReleaseLatest || releaseVersionRE.MatchString(v) }
 
 // ReleaseClaims is the payload of a release record. Field order is the wire
 // order.
 type ReleaseClaims struct {
 	Signers []string `json:"signers"`           // "<type> <base64>", in config order
-	Version string   `json:"version,omitempty"` // v<x.y.z>; absent: the record names keys only
+	Version string   `json:"version,omitempty"` // v<x.y.z> or latest; absent: the record names keys only
 	SetAtMs int64    `json:"set_at_ms"`         // the registrar's start time, unix milliseconds; not when the setting changed
 	Iat     int64    `json:"iat"`
 	Exp     int64    `json:"exp"`
@@ -50,7 +54,7 @@ type ReleaseClaims struct {
 // Release is the operator's release setting.
 type Release struct {
 	Signers []string // "<type> <base64>", never empty
-	Version string   // "" or v<x.y.z>
+	Version string   // "" or v<x.y.z> or latest
 	// SetAt is the registrar's start time: the config is read only then, and
 	// every restart moves it, the same config or not. Consumers must not order
 	// or key anything by it.
